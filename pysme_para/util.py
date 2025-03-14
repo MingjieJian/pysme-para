@@ -119,3 +119,41 @@ def get_vmac(Teff, sp_type):
         result = np.where(Teff < 5500, 7 - (5.5 - Teff/1000)**2.6, 7 + (Teff/1000 - 5.5)**2.6)
     result[result < 0] = 0
     return result
+
+def sigma_clip(data, sigma=3.0, max_iters=None, return_mask=False):
+    """
+    对数据进行 Sigma Clipping 处理。
+
+    参数:
+    - data: 输入数据 (NumPy 数组)
+    - sigma: sigma clipping 阈值 (默认 3.0)
+    - max_iters: 最大迭代次数 (如果为 None，则直到收敛)
+    - return_mask: 如果为 True，则返回掩码数组，而不是裁剪后的数据
+
+    返回:
+    - 经过 sigma clipping 处理后的数据 或 掩码数组
+    """
+    data = np.asarray(data)  # 确保是 NumPy 数组
+    mask = np.ones_like(data, dtype=bool)  # 初始化掩码（全部为 True）
+    
+    previous_mask = np.zeros_like(mask)  # 记录上一次的掩码状态
+    iteration = 0
+
+    while not np.array_equal(mask, previous_mask):  # 直到掩码不再变化
+        if max_iters is not None and iteration >= max_iters:
+            break  # 达到最大迭代次数
+        
+        previous_mask = mask.copy()  # 记录当前掩码
+        
+        mean = np.mean(data[mask])  # 计算均值（仅对未被剪除的数据）
+        std = np.std(data[mask])  # 计算标准差
+        
+        # 更新掩码：剔除超出 sigma*std 范围的数据
+        mask = np.abs(data - mean) <= sigma * std
+
+        iteration += 1  # 迭代计数
+
+    if return_mask:
+        return mask  # 返回布尔掩码
+    else:
+        return data[mask]  # 返回剔除异常值后的数据

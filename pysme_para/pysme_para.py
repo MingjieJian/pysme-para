@@ -8,6 +8,11 @@ from pysme.synthesize import synthesize_spectrum
 from pysme.solve import solve
 from copy import copy
 
+from astropy.table import Table
+from scipy.interpolate import Akima1DInterpolator,interp1d
+
+import sys
+
 def select_lines(spectra, Teff, vald, purity_crit, fwhm, SNR, verbose=False, select_mode='depth'):
 
     '''
@@ -234,6 +239,318 @@ def select_lines(spectra, Teff, vald, purity_crit, fwhm, SNR, verbose=False, sel
         print('N lines found:',len(vald_unique), ', N lines kept:', len(keep) )
 
     return(myresult)
+
+def para_first_estimate(wav, flux, flux_err):
+    '''
+    First estimate of the stellar parameters, assuming we know nothing of the star, using cross-correlation with the templates.
+    '''
+
+    # Todo: if the template is specified, broaden them according to R and V_broad.
+    
+
+def measure_teff_fe(wav, flux, flux_err, R, s_n, line_list, teff_init, logg_init, monh_init, vmic_init, vmac_init, vsini_init, ion_list=['Fe 1', 'Fe 2'], spec_margin=0.2, linelist_margin=2):
+    '''
+    Measure the effective temperature of a star using the Fe I lines.
+    '''
+    sme = SME_Structure()
+    sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff-200, logg, monh, vmic, vmac, vsini
+    sme.iptype = 'gauss'
+    sme.ipres = 50000
+    sme.wave = wave_fit
+    sme.spec = flux_fit[wave_fit < 5700]
+    sme.uncs = flux_err_fit[wave_fit < 5700]
+    sme.linelist = line_list
+    sme = solve(sme, ['teff'], linelist_mode='auto')
+
+
+# The following function measures photometric logg following the GALAH approach.
+# From Sven Buder
+
+def bracket(inval,grval,nn,idx=False):
+    
+    '''
+    bracket by +/-nn values over (irregular) grid. If idx True, then indices 
+    are returned instead    
+    '''
+
+    norep = np.sort(np.array(list(dict.fromkeys(list(grval)))))
+    
+    x1    = np.where(norep<=inval)
+    x2    = np.where(norep>inval)
+    
+    if idx==False:
+        lo = norep[x1][-nn::]
+        up = norep[x2][0:nn]        
+    else:
+        lo = x1[0][-nn::]
+        up = x2[0][0:nn]
+        
+    return(lo,up)
+
+
+def mal(val,gridt,gridbc,dset):
+    '''
+    linear interpolation for 2 points, Akima for more. Returns nan if 
+    not possible or if extrapolated. The MARCS grid of BC used here is ordered
+    such that gridt is monotonic. If not, sorting is necessary.
+    '''
+    if len(dset[0])>2:
+        mfun = Akima1DInterpolator(gridt[dset],gridbc[dset])
+        itp  = mfun(val)
+    if len(dset[0])==2:
+        mfun = interp1d(gridt[dset],gridbc[dset],bounds_error=False) 
+        itp  = mfun(val)        
+    if len(dset[0])<2:
+        itp = np.nan
+    return(itp)
+
+
+# read input tables of BCs for several values of E(B-V)
+files = ['/home/mingjie/software/GALAH_DR4/auxiliary_information/BC_Tables/grid/STcolors_2MASS_GaiaDR2_EDR3_Rv3.1_EBV_0.00.dat']
+gebv   = [0.0]
+gri_bc = []
+
+kk=0
+for f in files:
+
+    grid = Table.read(f,format='ascii')
+    if kk==0:
+        gteff, gfeh, glogg = grid['Teff'],grid['feh'],grid['logg']
+
+    bc_g2  = grid['mbol']-grid['G2']
+    bc_bp2 = grid['mbol']-grid['BP2']
+    bc_rp2 = grid['mbol']-grid['RP2']
+
+    bc_g3  = grid['mbol']-grid['G3']
+    bc_bp3 = grid['mbol']-grid['BP3']
+    bc_rp3 = grid['mbol']-grid['RP3']
+
+    bc_j   = grid['mbol']-grid['J']
+    bc_h   = grid['mbol']-grid['H']
+    bc_k   = grid['mbol']-grid['Ks']
+
+    tmp = np.transpose([bc_g2,bc_bp2,bc_rp2,bc_g3,bc_bp3,bc_rp3,bc_j,bc_h,bc_k])
+    gri_bc.append(tmp)
+
+    kk=kk+1
+
+gebv   = np.array(gebv)
+gri_bc = np.array(gri_bc)
+
+parsec = Table.read('/home/mingjie/software/GALAH_DR4/auxiliary_information/parsec_isochrones/parsec_isochrones_logt_8p00_0p01_10p17_mh_m2p75_0p25_m0p75_mh_m0p60_0p10_0p70_GaiaEDR3_2MASS.fits')
+
+def bcstar(teff,logg,feh,alpha_fe):
+    '''
+    compute Bolometric Corrections for stars of known input parameters    
+    '''
+#     teff = np.min([np.max([teff,np.min(grid['Teff'])]),np.max(grid['Teff'])])
+#     if teff < 3900:
+#         logg = np.min([np.max([logg,np.min(grid['logg'])]),5.5])
+#     else:
+#         logg = np.min([np.max([logg,np.min(grid['logg'])]),5.0])
+#     feh = np.min([np.max([feh,np.min(grid['feh'])]),np.max(grid['feh'])])
+    
+    frange = [8]
+    flist = ['BC_Ks']
+    rmi = [8]
+
+    itp_bc = np.nan
+    arr_bc  = np.nan
+
+    fold      = [feh]
+        
+    # take +/-3 steps in [Fe/H] grid
+    snip = np.concatenate(bracket(fold,gfeh,3))
+    itp1 = np.zeros((len(snip)))+np.nan
+    
+    for k in range(len(snip)):
+
+        x0   = np.where((gfeh==snip[k]) & (np.abs(glogg-logg)<1.1))
+        lg0  = np.array(list(dict.fromkeys(list(glogg[x0]))))
+        itp0 = np.zeros((len(lg0)))+np.nan
+
+        # at given logg and feh, range of Teff to interpolate across
+        for j in range(len(lg0)):
+            ok      = np.where((np.abs(gteff-teff)<1000) & \
+                               (gfeh==snip[k]) & (glogg==lg0[j]))
+
+            itp0[j] = mal(teff,gteff,gri_bc[0,:,8],ok)
+
+        # remove any nan, in case. Either of itp[?,:,:] is enough
+        k0 = np.where(np.isnan(itp0[:])==False)
+        # interpolate in logg at correct Teff
+        itp1[k] = mal(logg,lg0,itp0[:],k0)
+        
+    k1  = np.where(np.isnan(itp1[:])==False)
+    
+    bc_ks = mal(fold,snip,itp1[:],k1)
+
+    if np.isnan(bc_ks):
+        
+        bc_grid = np.genfromtxt('../../../../software/GALAH_DR4//auxiliary_information/BC_Tables/grid/STcolors_2MASS_GaiaDR2_EDR3_Rv3.1_EBV_0.00.dat',names=True)
+        file = open('../../../../software/GALAH_DR4/auxiliary_information/BC_Tables/grid/bc_grid_kdtree_ebv_0.00.pickle','rb')
+        bc_kdtree = pickle.load(file)
+        file.close()
+        
+        bc_distance_matches, bc_closest_matches = bc_kdtree.query(np.array([np.log10(teff),logg,feh,alpha_fe]).T,k=8)
+        bc_ks = np.average(bc_grid['mbol'][bc_closest_matches] - bc_grid['Ks'][bc_closest_matches],weights=bc_distance_matches,axis=-1)
+        
+    else:
+        bc_ks = bc_ks[0]
+        
+    return(bc_ks)
+
+def calculate_age_mass(teff, logg, loglum, m_h, e_teff=100, e_logg=0.5, e_loglum=0.1, e_m_h=0.2, useChabrier=False, debug=False):
+
+    e_loglum = e_loglum * loglum
+    
+    # Make sure that [Fe/H] stays within parsec grid limits
+    unique_m_h = np.unique(parsec['m_h'])
+    if m_h < unique_m_h[0]:
+        m_h = unique_m_h[0] + 0.001
+        print('adjust m_h input to ',m_h)
+    if m_h > unique_m_h[-1]:
+        m_h = unique_m_h[-1] - 0.001
+        print('adjust m_h input to ',m_h)
+        
+    # Make sure we have at least 2 [Fe/H] dimensions to integrate over
+    lower_boundary_m_h = np.argmin(np.abs(unique_m_h - (m_h - e_m_h)))
+    upper_boundary_m_h = np.argmin(np.abs(unique_m_h - (m_h + e_m_h)))
+    if lower_boundary_m_h == upper_boundary_m_h:
+        if lower_boundary_m_h == 0:
+            upper_boundary_m_h = 1
+        if lower_boundary_m_h == len(unique_m_h)-1:
+            lower_boundary_m_h = len(unique_m_h)-2
+    
+    # find all relevant isochrones points
+    relevant_isochrone_points = (
+        (parsec['logT'] > np.log10(teff - e_teff)) & 
+        (parsec['logT'] < np.log10(teff + e_teff)) &
+        (parsec['logg'] > logg - e_logg) & 
+        (parsec['logg'] < logg + e_logg) &
+        (parsec['logL'] > loglum - e_loglum) & 
+        (parsec['logL'] < loglum + e_loglum) &
+        (parsec['m_h']  >= unique_m_h[lower_boundary_m_h]) & 
+        (parsec['m_h']  <= unique_m_h[upper_boundary_m_h])
+    )
+    # if len(parsec['logT'][relevant_isochrone_points]) < 10:
+    #     print('Only '+str(len(parsec['logT'][relevant_isochrone_points]))+' isochrones points available')
+    
+    # 
+    model_points = np.array([
+        10**parsec['logT'][relevant_isochrone_points],
+        parsec['logg'][relevant_isochrone_points],
+        parsec['logL'][relevant_isochrone_points],
+        parsec['m_h'][relevant_isochrone_points]
+    ]).T
+    
+    # find normalising factor
+    norm = np.log(np.sqrt((2.*np.pi)**4.*np.prod(np.array([e_teff, e_logg, e_loglum ,e_m_h])**2)))
+    
+    # sum up lnProb and weight ages/masses by 
+    if useChabrier:
+        lnLike = - np.sum(((model_points - [teff, logg, loglum, m_h])/[e_teff, e_logg, e_loglum, e_m_h])**2, axis=1) - norm        
+        lnPrior = np.log(22.8978 * np.exp( - (716.4/parsec['mass'][relevant_isochrone_points])**0.25) * (parsec['mass'][relevant_isochrone_points])**(-3.3))   
+        lnProb = lnLike + lnPrior
+        
+        if debug:
+            f, gs = plt.subplots(1,4,figsize=(15,5))
+            ax = gs[0]
+            s = ax.scatter(model_points[:,0],model_points[:,1],c=lnLike,s=1)
+            ax.set_xlabel('teff')
+            ax.set_ylabel('logg')
+            c = plt.colorbar(s,ax=ax)
+            c.set_label('lnLike')
+            ax = gs[1]
+            s = ax.scatter(model_points[:,0],model_points[:,1],c=lnPrior,s=1)
+            ax.set_xlabel('teff')
+            ax.set_ylabel('logg')
+            c = plt.colorbar(s,ax=ax)
+            c.set_label('lnPrior')
+            ax = gs[2]
+            s = ax.scatter(model_points[:,0],model_points[:,1],c=lnProb,s=1)
+            ax.set_xlabel('teff')
+            ax.set_ylabel('logg')
+            c = plt.colorbar(s,ax=ax)
+            c.set_label('lnProb')
+            ax = gs[3]
+            s = ax.scatter(parsec['mass'][relevant_isochrone_points],model_points[:,1],c=lnPrior,s=1)
+            ax.set_xlabel('mass')
+            ax.set_ylabel('logg')
+            c = plt.colorbar(s,ax=ax)
+            c.set_label('lnPrior')
+            plt.tight_layout()
+            plt.show()
+            plt.close()
+        
+    else:
+        lnProb = - np.sum(((model_points - [teff, logg, loglum, m_h])/[e_teff, e_logg, e_loglum, e_m_h])**2, axis=1) - norm        
+        
+    age = np.sum(10**parsec['logAge'][relevant_isochrone_points] * np.exp(lnProb)/10**9)
+    mass = np.sum(parsec['mass'][relevant_isochrone_points] * np.exp(lnProb))
+    
+    # Normalise by probability
+    Prob_sum = np.sum(np.exp(lnProb))
+    age /= Prob_sum
+    mass /= Prob_sum
+
+    if debug:
+        plt.figure()
+        plt.hist(parsec['mass'][relevant_isochrone_points],bins=30)
+        print(teff, logg, loglum, m_h)
+        print(e_teff, e_logg, e_loglum, e_m_h)
+        print('min_max_teff',10**np.min(parsec['logT'][relevant_isochrone_points]),10**np.max(parsec['logT'][relevant_isochrone_points]))
+        print('min_max_logg',np.min(parsec['logg'][relevant_isochrone_points]),np.max(parsec['logg'][relevant_isochrone_points]))
+        print('min_max_m_h',np.min(parsec['m_h'][relevant_isochrone_points]),np.max(parsec['m_h'][relevant_isochrone_points]))
+        print('min_max_mass',np.min(parsec['mass'][relevant_isochrone_points]),np.max(parsec['mass'][relevant_isochrone_points]))
+        print('age',str(age))
+        print('mass',str(mass))
+        plt.show()
+        plt.close()
+    
+    return(age, mass)
+
+def calculate_logg_parallax(teff, logg_in, fe_h, ks_m, ks_msigcom, r_med, r_lo, r_hi, a_ks, e_teff=100, e_logg=0.25, e_m_h=0.2):
+    '''
+    Main function to estimate photometric logg.
+    
+    r_med : 
+        The distance of the star in pc.
+    '''
+    if fe_h < -1:
+        alpha_fe = 0.4
+    elif fe_h > 0:
+        alpha_fe = 0.0
+    else:
+        alpha_fe = -0.4 *fe_h
+    
+    m_h = fe_h + np.log10(10**alpha_fe * 0.694 + 0.306)
+        
+    bc_ks = bcstar(teff, logg_in, fe_h, alpha_fe)
+    
+    loglbol = - 0.4 * (ks_m - 5.0*np.log10(r_med/10.) + bc_ks - a_ks - 4.75)#[0]
+    # Take into account uncertainties of Ks, distance, and adds uncertainties of +- 0.05 mag for A(Ks) and BC(Ks)
+    loglbol_lo = - 0.4 * (ks_m + ks_msigcom - 5.0*np.log10(r_lo/10.) + (bc_ks + 0.05) - (a_ks - 0.05) - 4.75)#[0]
+    loglbol_hi = - 0.4 * (ks_m - ks_msigcom - 5.0*np.log10(r_hi/10.) + (bc_ks - 0.05) - (a_ks + 0.05) - 4.75)#[0]
+    
+    e_loglum = 0.5*(loglbol_hi-loglbol_lo) / loglbol
+
+    age, mass = calculate_age_mass(teff, logg_in, loglbol, m_h, e_teff, e_logg, e_loglum, e_m_h)
+    if np.isnan(mass):
+        if sys.argv[1] == '-f':
+            print('Mass could not be estimated, trying again with 2x errors')
+        age, mass = calculate_age_mass(teff, logg_in, loglbol, m_h, e_teff*2, e_logg*2, e_loglum*2, e_m_h*2)
+        if np.isnan(mass):
+            if sys.argv[1] == '-f':
+                print('Mass could not be estimated, trying again with 3x the errors')
+            age, mass = calculate_age_mass(teff, logg_in, loglbol, m_h, e_teff*3, e_logg*3, e_loglum*3, e_m_h*3)
+            if np.isnan(mass):
+                if sys.argv[1] == '-f':
+                    print('Mass could not be estimated, assuming 1Mbol')
+                mass = 1.0
+                age = np.NaN
+        
+    return(4.438 + np.log10(mass) + 4*np.log10(teff/5772.) - loglbol, mass, age, bc_ks, 10**loglbol, loglbol_lo, loglbol_hi)
 
 def pysme_para_main(wav_obs, flux_obs, flux_err_obs, R, s_n, line_list, teff_init, logg_init, monh_init, vmic_init, vmac_init, vsini_init, ion_list=['Fe 1', 'Fe 2'], spec_margin=0.2, linelist_margin=2):
     
