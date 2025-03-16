@@ -162,12 +162,33 @@ def select_lines(fit_line_group, spec_syn, ele_fit, ion_fit, sensitivity_dominan
 
     return fit_line_group
 
+def is_within_ranges(line_wav, line_mask_remove):
+    """
+    判断 line_wav 是否在 line_mask_remove 的任意区间内，
+    支持 line_wav 为标量或 NumPy 数组。
+    Used in abund_fit.
+
+    参数:
+    - line_wav: float 或 np.ndarray，待检查的波长值（可以是单个值或数组）。
+    - line_mask_remove: list of [a, b]，包含要排除的波长区间。
+
+    返回:
+    - bool 或 np.ndarray: 若 line_wav 是标量，返回 bool；若是数组，返回 bool 数组。
+    """
+    line_wav = np.atleast_1d(line_wav)  # 确保 line_wav 是数组
+    mask = np.zeros_like(line_wav, dtype=bool)  # 初始化结果（默认 False）
+
+    for a, b in line_mask_remove:
+        mask |= (a <= line_wav) & (line_wav <= b)  # 逐个区间检查
+    
+    return np.all(mask)  # 保持输入输出一致性
+
 def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg, m_h, vmic, vmac, vsini, abund, use_list, 
               spec_syn, synth_margin=5,
               ele_blend=[],
               save_path=None, plot=False, atmo=None, normalization=False, nlte=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=0.1,
               synth_cont_level=0.025, cscale_flag='constant',
-              blending_line_plot=[]):
+              blending_line_plot=[], line_mask_remove=None):
 
     '''
     Fit the abundance of a single line.
@@ -198,6 +219,8 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     # Define masks
     mask = np.zeros_like(sme_fit.wave[0], dtype=int)
     indices_con = (np.abs(sme_fit.synth[0] - 1) < synth_cont_level)
+    if telluric_spec is not None:
+        indices_con &= telluric_spec > 1-0.1
     return_mask = util.sigma_clip(
     (flux[indices_con] / sme_fit.synth[0][indices_con]), sigma=2.0, return_mask=True)
     true_indices = np.where(indices_con)[0]
@@ -257,6 +280,9 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     else:
         sigma_EW = np.nan
         fit_flag = 'error'
+
+    if is_within_ranges(line_wav, line_mask_remove):
+        fit_flag = 'removed'
 
     if telluric_spec is not None and max_telluric_depth > max_telluric_depth_thres:
         fit_flag = 'telluric_blended'
@@ -376,7 +402,7 @@ def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_
     plt.close()
 
 def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, line_list, ele_fit, 
-                ele_blend=[], ion_fit=[1, 2], nlte_ele=[], result_folder=None, line_mask_remove=None, abund=None, plot=False, standard_values=None, abund_record=None, save=False, overwrite=False, central_depth_thres=0.01, cal_central_depth=True, sensitivity_dominance_thres=0.3, line_dominance_thres=0.3, max_line_num=10, normalization=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=None, line_select_save=False, fit_line_group=None, sensitive_synth=None, blending_line_plot=[]):
+                ele_blend=[], ion_fit=[1, 2], nlte_ele=[], result_folder=None, line_mask_remove=None, abund=None, plot=False, standard_values=None, abund_record=None, save=False, overwrite=False, central_depth_thres=0.01, cal_central_depth=True, sensitivity_dominance_thres=0.3, line_dominance_thres=0.3, max_line_num=10, normalization=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=None, line_select_save=False, fit_line_group=None, sensitive_synth=None, blending_line_plot=[], cscale_flag='constant'):
     '''
     The main function for determining abundances using pysme.
     Input: observed wavelength, normalized flux, teff, logg, [M/H], vmic, vmac, vsini, line_list, pysme initial abundance list, line mask of wavelength to be removed.
@@ -435,15 +461,15 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
         print('Using the provided line selection and sensitive spectra.')
         pass
     else:
-        if line_mask_remove is not None:
-            if type(line_mask_remove[0]) != list:
-                line_mask_remove = [line_mask_remove]
-            indices = wave > 0
-            for mask in line_mask_remove:
-                indices &= (wave < mask[0]) | (wave > mask[1])
-            fit_line_group = find_line_groups(wave[indices], ele_fit+ele_blend, ion_fit, line_list, v_broad)
-        else:
-            fit_line_group = find_line_groups(wave, ele_fit+ele_blend, ion_fit, line_list, v_broad)
+        # if line_mask_remove is not None:
+        #     if type(line_mask_remove[0]) != list:
+        #         line_mask_remove = [line_mask_remove]
+        #     indices = wave > 0
+        #     for mask in line_mask_remove:
+        #         indices &= (wave < mask[0]) | (wave > mask[1])
+        #     fit_line_group = find_line_groups(wave[indices], ele_fit+ele_blend, ion_fit, line_list, v_broad)
+        # else:
+        fit_line_group = find_line_groups(wave, ele_fit+ele_blend, ion_fit, line_list, v_broad)
         
         sensitive_synth = get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit+ele_blend, ion_fit, fit_line_group, nlte_ele=nlte_ele)
         fit_line_group = select_lines(fit_line_group, sensitive_synth, ele_fit+ele_blend, ion_fit, sensitivity_dominance_thres=sensitivity_dominance_thres, line_dominance_thres=line_dominance_thres, max_line_num=max_line_num, output_all=False)
@@ -487,7 +513,8 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
                     ele_blend=ele_blend,
                     save_path=f"{result_folder}/{ele}/{ele}_{ion}", atmo=None, plot=plot, normalization=normalization, fit_rv=fit_rv, telluric_spec=telluric_spec,
                     max_telluric_depth_thres=max_telluric_depth_thres,
-                    blending_line_plot=blending_line_plot)
+                    blending_line_plot=blending_line_plot,line_mask_remove=line_mask_remove,
+                    cscale_flag=cscale_flag)
 
                     fit_result.append({f'A({ele})':fitresults.values[0], f'err_A({ele})':fitresults.fit_uncertainties[0], 'EW':EW, 'diff_EW':diff_EW, 'flag':fit_flag})
 

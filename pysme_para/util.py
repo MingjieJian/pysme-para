@@ -145,8 +145,8 @@ def sigma_clip(data, sigma=3.0, max_iters=None, return_mask=False):
         
         previous_mask = mask.copy()  # 记录当前掩码
         
-        mean = np.mean(data[mask])  # 计算均值（仅对未被剪除的数据）
-        std = np.std(data[mask])  # 计算标准差
+        mean = np.nanmean(data[mask])  # 计算均值（仅对未被剪除的数据）
+        std = np.nanstd(data[mask])  # 计算标准差
         
         # 更新掩码：剔除超出 sigma*std 范围的数据
         mask = np.abs(data - mean) <= sigma * std
