@@ -23,6 +23,7 @@ setuptools.setup(
         "scipy",
         "numpy"
     ],
-    include_package_data=True,  
-    #   package_data={'': ['moog_nosm/moog_nosm_FEB2017/']},
+    include_package_data=True,
+    packages=setuptools.find_packages(include=["pysme_para"]),
+    # package_data={'': ['data/']},
     zip_safe=False)

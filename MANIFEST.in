@@ -1,0 +1,2 @@
+include MANIFEST.in
+recursive-include pysme_para/data *

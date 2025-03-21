@@ -3,6 +3,7 @@ import pandas as pd
 from scipy.signal import convolve
 import matplotlib.pyplot as plt
 
+from pysme.abund import Abund
 from pysme.sme import SME_Structure
 from pysme.synthesize import synthesize_spectrum
 from pysme.solve import solve
@@ -11,7 +12,9 @@ from copy import copy
 from astropy.table import Table
 from scipy.interpolate import Akima1DInterpolator,interp1d
 
-import sys
+import sys, pkg_resources, pickle
+
+from . import pysme_abund, util
 
 def select_lines(spectra, Teff, vald, purity_crit, fwhm, SNR, verbose=False, select_mode='depth'):
 
@@ -249,19 +252,48 @@ def para_first_estimate(wav, flux, flux_err):
     
 #------------------Teff------------------
 
-def measure_teff_fe(wav, flux, flux_err, R, s_n, line_list, teff_init, logg_init, monh_init, vmic_init, vmac_init, vsini_init, ion_list=['Fe 1', 'Fe 2'], spec_margin=0.2, linelist_margin=2):
+def measure_teff_fe1(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, R, line_list, abund=None):
     '''
-    Measure the effective temperature of a star using the Fe I lines.
+    Measure Teff from Fe 1 lines.
     '''
+
+    v_broad = np.sqrt(vmic**2 + vmac**2 + vsini**2 + (3e5/R)**2)
+    if abund is None:
+        abund = Abund.solar()
+        abund.monh = monh
+
+    # Select the Fe 1 and Fe 2 lines according to the current stellar parameters
+    fit_line_group = pysme_abund.find_line_groups(wave, ['Fe'], [1], line_list, v_broad)
+    spec_syn = pysme_abund.get_sensitive_synth(wave, R, teff, logg, monh, vmic, vmac, vsini, line_list, abund, ['Fe'], [1], fit_line_group)
+    fe_lines = pysme_abund.select_lines(fit_line_group, spec_syn, ['Fe'], [1], sensitivity_dominance_thres=0.6, line_dominance_thres=0.5, max_line_num=50)
+    fe_lines['Fe'][1] = fe_lines['Fe'][1].sort_values('wav_s')
+
+    # Select the line region for Teff fitting.
+    wav_range_list = [[fit_line_group['Fe'][1].loc[i, 'wav_s'], fit_line_group['Fe'][1].loc[i, 'wav_e']] for i in fit_line_group['Fe'][1].index]
+    
+    wave_fit = []
+    flux_fit = []
+    flux_err_fit = []
+    for wav_range in wav_range_list:
+        indices = (wave >= wav_range[0]) & (wave < wav_range[1])
+        wave_fit.append(wave[indices])
+        flux_fit.append(flux[indices])
+        flux_err_fit.append(flux_err)
+
     sme = SME_Structure()
-    sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff-200, logg, monh, vmic, vmac, vsini
+    sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
     sme.iptype = 'gauss'
-    sme.ipres = 50000
+    sme.ipres = R
     sme.wave = wave_fit
-    sme.spec = flux_fit[wave_fit < 5700]
-    sme.uncs = flux_err_fit[wave_fit < 5700]
+    sme.spec = flux_fit
+    sme.uncs = flux_err_fit
     sme.linelist = line_list
     sme = solve(sme, ['teff'], linelist_mode='auto')
+
+    teff = sme.fitresults.values[0]
+    teff_error = sme.fitresults.uncertainties[0]
+    teff_fit_error = sme.fitresults.fit_uncertainties[0]
+    return teff, teff_error, teff_fit_error
 
 
 # The following function measures photometric logg following the GALAH approach.
@@ -288,7 +320,6 @@ def bracket(inval,grval,nn,idx=False):
         
     return(lo,up)
 
-
 def mal(val,gridt,gridbc,dset):
     '''
     linear interpolation for 2 points, Akima for more. Returns nan if 
@@ -307,7 +338,8 @@ def mal(val,gridt,gridbc,dset):
 
 
 # read input tables of BCs for several values of E(B-V)
-files = ['/home/mingjie/software/GALAH_DR4/auxiliary_information/BC_Tables/grid/STcolors_2MASS_GaiaDR2_EDR3_Rv3.1_EBV_0.00.dat']
+files = [pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/BC_Tables/grid/STcolors_2MASS_GaiaDR2_EDR3_Rv3.1_EBV_0.00.dat")]
+
 gebv   = [0.0]
 gri_bc = []
 
@@ -338,7 +370,8 @@ for f in files:
 gebv   = np.array(gebv)
 gri_bc = np.array(gri_bc)
 
-parsec = Table.read('/home/mingjie/software/GALAH_DR4/auxiliary_information/parsec_isochrones/parsec_isochrones_logt_8p00_0p01_10p17_mh_m2p75_0p25_m0p75_mh_m0p60_0p10_0p70_GaiaEDR3_2MASS.fits')
+parsec = Table.read(pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/parsec_isochrones/parsec_isochrones_logt_8p00_0p01_10p17_mh_m2p75_0p25_m0p75_mh_m0p60_0p10_0p70_GaiaEDR3_2MASS.fits"))
+
 
 def bcstar(teff,logg,feh,alpha_fe):
     '''
@@ -388,8 +421,10 @@ def bcstar(teff,logg,feh,alpha_fe):
 
     if np.isnan(bc_ks):
         
-        bc_grid = np.genfromtxt('../../../../software/GALAH_DR4//auxiliary_information/BC_Tables/grid/STcolors_2MASS_GaiaDR2_EDR3_Rv3.1_EBV_0.00.dat',names=True)
-        file = open('../../../../software/GALAH_DR4/auxiliary_information/BC_Tables/grid/bc_grid_kdtree_ebv_0.00.pickle','rb')
+        bc_grid = np.genfromtxt(pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/BC_Tables/grid/STcolors_2MASS_GaiaDR2_EDR3_Rv3.1_EBV_0.00.dat"), names=True)
+        
+        file = open(pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/BC_Tables/grid/bc_grid_kdtree_ebv_0.00.pickle"), 'rb')
+        
         bc_kdtree = pickle.load(file)
         file.close()
         
