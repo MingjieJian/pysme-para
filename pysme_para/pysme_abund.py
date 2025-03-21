@@ -64,10 +64,7 @@ def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, 
     sme.abund = abund
     sme.wave = wave
     for nlte_ele_single in nlte_ele:
-        if ele == 'Na':
-            sme.nlte.set_nlte(ele, '/mnt/hard_disk/data/pysme_data/nlte_grids/nlte_Na_scatt_pysme/nlte_Na_scatt_pysme.grd')
-        else:
-            sme.nlte.set_nlte(ele)
+        sme.nlte.set_nlte(nlte_ele_single)
     spec_syn_all = pysme_synth.batch_synth(sme, line_list, parallel=True, n_jobs=10)
 
     # Calculate the sensitive spectra for the fitting elements.
@@ -210,15 +207,18 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     sme_fit.ipres = R
     sme_fit.abund = copy(abund)
     sme_fit.linelist = use_list
-    indices = (wav >= fit_range[0]) & (wav <= fit_range[1])
     sme_fit.wave = wav
+    sme_fit = synthesize_spectrum(sme_fit)
     sme_fit.spec = flux
     sme_fit.uncs = flux_uncs
-    sme_fit = synthesize_spectrum(sme_fit)
 
     # Define masks
     mask = np.zeros_like(sme_fit.wave[0], dtype=int)
     indices_con = (np.abs(sme_fit.synth[0] - 1) < synth_cont_level)
+    print('test')
+    print(sme_fit.wave[0])
+    print(sme_fit.linelist)
+    print(line_wav, sme_fit.synth[0], indices_con, telluric_spec)
     if telluric_spec is not None:
         indices_con &= telluric_spec > 1-0.1
     return_mask = util.sigma_clip(
@@ -228,6 +228,7 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
 
     if cscale_flag not in ['none', 'fix']:
         mask[indices_con] = 2
+    indices = (wav >= fit_range[0]) & (wav <= fit_range[1])
     mask[indices] = 1
     sme_fit.cscale_flag = cscale_flag
     sme_fit.mask = mask

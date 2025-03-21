@@ -247,6 +247,7 @@ def para_first_estimate(wav, flux, flux_err):
 
     # Todo: if the template is specified, broaden them according to R and V_broad.
     
+#------------------Teff------------------
 
 def measure_teff_fe(wav, flux, flux_err, R, s_n, line_list, teff_init, logg_init, monh_init, vmic_init, vmac_init, vsini_init, ion_list=['Fe 1', 'Fe 2'], spec_margin=0.2, linelist_margin=2):
     '''
@@ -551,6 +552,8 @@ def calculate_logg_parallax(teff, logg_in, fe_h, ks_m, ks_msigcom, r_med, r_lo, 
                 age = np.NaN
         
     return(4.438 + np.log10(mass) + 4*np.log10(teff/5772.) - loglbol, mass, age, bc_ks, 10**loglbol, loglbol_lo, loglbol_hi)
+
+
 
 def pysme_para_main(wav_obs, flux_obs, flux_err_obs, R, s_n, line_list, teff_init, logg_init, monh_init, vmic_init, vmac_init, vsini_init, ion_list=['Fe 1', 'Fe 2'], spec_margin=0.2, linelist_margin=2):
     
