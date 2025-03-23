@@ -14,7 +14,20 @@ from scipy.interpolate import Akima1DInterpolator,interp1d
 
 import sys, pkg_resources, pickle
 
-from . import pysme_abund, util
+from contextlib import redirect_stdout
+from tqdm.notebook import tqdm
+from copy import deepcopy
+from pqdm.processes import pqdm
+from scipy import stats
+
+from pysme.atmosphere.interpolation import AtmosphereInterpolator
+from pysme.atmosphere.savfile import SavFile
+from pysme.large_file_storage import setup_atmo
+from pysme.synthesize import Synthesizer
+
+from . import pysme_abund, pysme_synth
+
+from scipy.stats import linregress
 
 def select_lines(spectra, Teff, vald, purity_crit, fwhm, SNR, verbose=False, select_mode='depth'):
 
@@ -278,7 +291,7 @@ def measure_teff_fe1(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, 
         indices = (wave >= wav_range[0]) & (wave < wav_range[1])
         wave_fit.append(wave[indices])
         flux_fit.append(flux[indices])
-        flux_err_fit.append(flux_err)
+        flux_err_fit.append(flux_err[indices])
 
     sme = SME_Structure()
     sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
@@ -295,6 +308,7 @@ def measure_teff_fe1(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, 
     teff_fit_error = sme.fitresults.fit_uncertainties[0]
     return teff, teff_error, teff_fit_error
 
+#------------------logg------------------
 
 # The following function measures photometric logg following the GALAH approach.
 # From Sven Buder
@@ -336,7 +350,6 @@ def mal(val,gridt,gridbc,dset):
         itp = np.nan
     return(itp)
 
-
 # read input tables of BCs for several values of E(B-V)
 files = [pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/BC_Tables/grid/STcolors_2MASS_GaiaDR2_EDR3_Rv3.1_EBV_0.00.dat")]
 
@@ -371,7 +384,6 @@ gebv   = np.array(gebv)
 gri_bc = np.array(gri_bc)
 
 parsec = Table.read(pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/parsec_isochrones/parsec_isochrones_logt_8p00_0p01_10p17_mh_m2p75_0p25_m0p75_mh_m0p60_0p10_0p70_GaiaEDR3_2MASS.fits"))
-
 
 def bcstar(teff,logg,feh,alpha_fe):
     '''
@@ -588,7 +600,655 @@ def calculate_logg_parallax(teff, logg_in, fe_h, ks_m, ks_msigcom, r_med, r_lo, 
         
     return(4.438 + np.log10(mass) + 4*np.log10(teff/5772.) - loglbol, mass, age, bc_ks, 10**loglbol, loglbol_lo, loglbol_hi)
 
+# Measure logg from ionization balance
 
+def mv_fit(sub_sme_single, fit_paras, fit_bounds):
+    with redirect_stdout(open(f"/dev/null", 'w')):
+        sub_sme_single = solve(sub_sme_single, fit_paras, bounds=fit_bounds)
+    return sub_sme_single
+    
+def measure_monh_fe12(teff, logg, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist, nlte=False):
+    '''
+    Measure [M/H] using Fe 1 and Fe 2 lines. For logg measurement.
+    '''
+
+    # Measure [M/H] from Fe 1 lines
+    wlcent, wlcent_mean, EW, monh_measure, monh_err_measure, vmic_measure, vmic_err_measure = [], [], [], [], [], [], []
+    
+    sme = SME_Structure()
+    sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
+    sme.iptype = 'gauss'
+    sme.ipres = R
+    if nlte:
+        sme.nlte.set_nlte('Fe')
+    sme.cscale_flag = 'constant'
+    
+    sub_sme = []
+    fit_paras, fit_bounds = ['monh'], [-1, 0.8]
+    for i in tqdm(fe1_lines.index):
+        line_wav = fe1_lines.loc[i, 'wlcent']
+        if type(line_wav) != list:
+            hwhm = (vmac+vsini)/3e5*line_wav
+        else:
+            hwhm = (vmac+vsini)/3e5*line_wav[0]
+    
+        sub_sme_single = deepcopy(sme)
+        if type(line_wav) != list:
+            indices = (wave >= line_wav-2*hwhm) & (wave <= line_wav+2*hwhm)
+        else:
+            indices = (wave >= line_wav[0]-2*hwhm) & (wave <= line_wav[-1]+2*hwhm)
+        sub_sme_single.wave = wave[indices]
+        sub_sme_single.spec = flux[indices]
+        sub_sme_single.uncs = flux_err[indices]
+        sub_sme_single.linelist = linelist[~((linelist['line_range_e'] < sub_sme_single.wave[0][0]) | (linelist['line_range_s'] > sub_sme_single.wave[0][-1]))]
+        if len(sub_sme_single.linelist) == 0:
+            print(sub_sme_single.wave[0])
+            raise ValueError('Empty linelist.')
+        sub_sme.append([sub_sme_single, fit_paras, fit_bounds])
+        wlcent.append(line_wav)
+        wlcent_mean.append(np.mean(line_wav))
+
+    pickle.dump(sub_sme, open('temp.pkl', 'wb'))
+    sub_sme = pqdm(sub_sme, mv_fit, n_jobs=10, argument_type='args')
+    mv_measure_fe1 = pd.DataFrame({'wlcent':wlcent, 'wlcent_mean':wlcent_mean, 
+                  'EW':[np.sum(1 - sub_sme_single.synth[0]) * np.mean(np.diff(sub_sme_single.wave[0])) for sub_sme_single in sub_sme]})
+    mv_measure_fe1['log(EW/wlcent)'] = np.log10(mv_measure_fe1['EW']/mv_measure_fe1['wlcent_mean'])
+    mv_measure_fe1['monh'] = [sub_sme_single.fitresults['values'][0] for sub_sme_single in sub_sme]
+    mv_measure_fe1['monh_err'] = [sub_sme_single.fitresults['fit_uncertainties'][0] for sub_sme_single in sub_sme]
+    
+    # Measure [M/H] from Fe 2 lines
+    wlcent, wlcent_mean, EW, monh_measure, monh_err_measure, vmic_measure, vmic_err_measure = [], [], [], [], [], [], []
+    
+    sme = SME_Structure()
+    sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
+    sme.iptype = 'gauss'
+    sme.ipres = R
+    if nlte:
+        sme.nlte.set_nlte('Fe')
+    sme.cscale_flag = 'constant'
+    
+    sub_sme = []
+    fit_paras, fit_bounds = ['monh'], [-1, 0.8]
+    for i in tqdm(fe2_lines.index):
+        line_wav = fe2_lines.loc[i, 'wlcent']
+        if type(line_wav) != list:
+            hwhm = (vmac+vsini)/3e5*line_wav
+        else:
+            hwhm = (vmac+vsini)/3e5*line_wav[0]
+    
+        sub_sme_single = deepcopy(sme)
+        if type(line_wav) != list:
+            indices = (wave >= line_wav-2*hwhm) & (wave <= line_wav+2*hwhm)
+        else:
+            indices = (wave >= line_wav[0]-2*hwhm) & (wave <= line_wav[-1]+2*hwhm)
+        sub_sme_single.wave = wave[indices]
+        sub_sme_single.spec = flux[indices]
+        sub_sme_single.uncs = flux_err[indices]
+        sub_sme_single.linelist = linelist[~((linelist['line_range_e'] < sub_sme_single.wave[0][0]) | (linelist['line_range_s'] > sub_sme_single.wave[0][-1]))]
+        sub_sme.append([sub_sme_single, fit_paras, fit_bounds])
+        wlcent.append(line_wav)
+        wlcent_mean.append(np.mean(line_wav))
+    
+    sub_sme = pqdm(sub_sme, mv_fit, n_jobs=10, argument_type='args')
+    mv_measure_fe2 = pd.DataFrame({'wlcent':wlcent, 'wlcent_mean':wlcent_mean, 
+                  'EW':[np.sum(1 - sub_sme_single.synth[0]) * np.mean(np.diff(sub_sme_single.wave[0])) for sub_sme_single in sub_sme]})
+    mv_measure_fe2['log(EW/wlcent)'] = np.log10(mv_measure_fe2['EW']/mv_measure_fe2['wlcent_mean'])
+    mv_measure_fe2['monh'] = [sub_sme_single.fitresults['values'][0] for sub_sme_single in sub_sme]
+    mv_measure_fe2['monh_err'] = [sub_sme_single.fitresults['fit_uncertainties'][0] for sub_sme_single in sub_sme]
+    
+    # Get the monh and precision from Fe1 and 2 lines
+    indices_fe1 = np.abs(mv_measure_fe1['monh'] - np.median(mv_measure_fe1['monh'])) <= 2*np.std(mv_measure_fe1['monh'])
+    monh_measure_fe1 = np.mean(mv_measure_fe1.loc[indices_fe1, 'monh'])
+    scatter_fe1 = np.std(mv_measure_fe1.loc[indices_fe1, 'monh'])
+    
+    indices_fe2 = np.abs(mv_measure_fe2['monh'] - np.median(mv_measure_fe2['monh'])) <= 2*np.std(mv_measure_fe2['monh'])
+    monh_measure_fe2 = np.mean(mv_measure_fe2.loc[indices_fe2, 'monh'])
+    scatter_fe2 = np.std(mv_measure_fe2.loc[indices_fe2, 'monh'])
+
+    p_value = stats.ttest_ind(mv_measure_fe1.loc[indices_fe1, 'monh'], mv_measure_fe2.loc[indices_fe2, 'monh'], equal_var=False).pvalue
+    
+    return([monh_measure_fe1, scatter_fe1, monh_measure_fe2, scatter_fe2, p_value, mv_measure_fe1, mv_measure_fe2])
+
+def measure_logg_fe12(teff, logg_array, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist, p_threshold=0.05, logg_diff=0.05):
+
+    monh_fe12_res_all = []
+    #Run measure_monh_fe12 for the logg_array
+    for logg in tqdm(logg_array):
+        monh_fe12_res = measure_monh_fe12(teff, logg, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist)
+        monh_fe12_res_all.append(monh_fe12_res)
+
+    # Refine sampling： Insert grid points between p_value threshold
+    p_values = np.array([ele[4] for ele in monh_fe12_res_all])
+    monh1_values = np.array([ele[0] for ele in monh_fe12_res_all])
+    monh2_values = np.array([ele[2] for ele in monh_fe12_res_all])
+    logg_interp = np.linspace(np.min(logg_array), np.max(logg_array), 500)
+    del_monh_interp = np.interp(logg_interp, logg_array, monh1_values-monh2_values)
+    logg_1st_est = logg_interp[np.argmin(np.abs(del_monh_interp))]
+    print('Best logg: ', logg_1st_est)
+    monh_fe12_res = measure_monh_fe12(teff, logg_1st_est, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist)
+    print(monh_fe12_res)
+    print(monh_fe12_res[4])
+    logg_array = np.concatenate([logg_array, [logg_1st_est]])
+    monh_fe12_res_all.append(monh_fe12_res)
+    print('p_values:', p_values)
+    p_values = np.concatenate([p_values, [monh_fe12_res[4]]])
+    print('p_values:', p_values)
+
+    unique_indices = np.unique(logg_array, return_index=True)[1]
+    # 根据索引重新排列 x 和 y
+    logg_array = logg_array[unique_indices]
+    p_values = p_values[unique_indices]
+    monh_fe12_res_all = [monh_fe12_res_all[i] for i in unique_indices]
+    
+    # Measure logg from monh_fe12_res_all
+    mask = p_values > p_threshold
+    start_index, end_index = -99, -99
+    print('Test test.')
+    print(p_values, p_threshold)
+    print(start_index, end_index)
+    print(mask)
+    if np.any(mask):
+        print('Here here')
+        start_index = np.where(mask)[0][0]  # 第一个超过阈值的位置
+        if start_index != 0:
+            start_index -= 1
+        end_index = np.where(mask)[0][-1]  # 最后一个超过阈值的位置
+        if end_index != len(logg_array)-1:
+            end_index += 1
+    # elif ~np.any(mask) and np.max(p_values) <= p_threshold:
+    else:
+        print('There there')
+        max_index = np.argmax(p_values)
+        p_values_exclude_max = np.delete(p_values, max_index)
+        # 找到新数组中最大值的索引
+        second_max_index_in_reduced = np.argmax(p_values_exclude_max)
+        # 转换回原数组中的索引
+        second_max_index = np.arange(len(p_values))[np.arange(len(p_values)) != max_index][second_max_index_in_reduced]
+        if max_index > second_max_index:
+            start_index, end_index = second_max_index, max_index
+        else:
+            start_index, end_index = max_index, second_max_index
+        
+    if start_index != -99 and end_index != -99:
+        # 加密采样区间
+        fine_logg = np.arange(logg_array[start_index], logg_array[end_index] + logg_diff, logg_diff)
+        print('Find logg created:', fine_logg, start_index, end_index, logg_array[start_index], logg_array[end_index])
+        fine_monh_fe12 = [measure_monh_fe12(teff, logg, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist) for logg in tqdm(fine_logg)]
+        # return monh_fe12_res_all, fine_monh_fe12
+        # 合并采样点
+        logg_array = np.concatenate([logg_array, fine_logg])
+        monh_fe12_res_all += fine_monh_fe12
+
+        # 去重并按顺序排列
+        # 找到唯一元素的索引
+        unique_indices = np.unique(logg_array, return_index=True)[1]
+        
+        # 根据索引重新排列 x 和 y
+        logg_array = logg_array[unique_indices]
+        monh_fe12_res_all = [monh_fe12_res_all[i] for i in unique_indices]
+
+        sorted_indices = np.argsort(logg_array)
+        logg_array = logg_array[sorted_indices]
+        monh_fe12_res_all = [monh_fe12_res_all[i] for i in sorted_indices]
+        
+    return logg_array, monh_fe12_res_all
+
+def measure_logg_from_p(logg_array, p_array, threshold=0.5):
+    crossing_indices = np.where((p_array[:-1] < threshold) & (p_array[1:] > threshold) |  (p_array[:-1] > threshold) & (p_array[1:] < threshold))[0]
+    
+    # 线性插值计算精确的 x 值
+    logg_bound = []
+    for i in crossing_indices:
+        x1, x2 = logg_array[i], logg_array[i+1]
+        y1, y2 = p_array[i], p_array[i+1]
+        
+        # 线性插值公式
+        interpolated_x = x1 + (threshold - y1) * (x2 - x1) / (y2 - y1)
+        logg_bound.append(interpolated_x)
+
+    logg = logg_array[np.argmax(p_array)]
+
+    return logg, np.array(logg_bound)
+
+def measure_logg_fe12_main(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, R, line_list,
+                           logg_array=np.arange(0, 4.5+0.1, 0.25), 
+                           abund=None, 
+                           sensitivity_dominance_thres=0.6,
+                           line_dominance_thres=0.5,
+                           max_line_num=50,
+                           plot=False, save_plot=None):
+    '''
+    This is the main entrypoint for measuring logg using ionization balance.
+    '''
+
+    if abund is None:
+        abund = Abund.solar()
+        abund.monh = monh
+    
+    if not {'central_depth', 'line_range_s', 'line_range_e'}.issubset(line_list._lines.columns) or np.abs(line_list.cdepth_range_paras[0]-teff) >= 500 or (np.abs(line_list.cdepth_range_paras[1]-logg) >= 1) or (np.abs(line_list.cdepth_range_paras[2]-monh) >= 0.5):
+        # Calculate the line depth from the pre-set stellar parameter
+        sme = SME_Structure()
+        sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
+        sme.abund = abund
+        use_list = pysme_synth.get_cdepth_range(sme, line_list, parallel=True, n_jobs=10)
+        use_list = use_list[use_list['central_depth'] > 0.1]
+    else:
+        use_list = line_list[line_list['central_depth'] > 0.1]
+
+    v_broad = np.sqrt(vmic**2 + vmac**2 + vsini**2 + (3e5/R)**2)
+    
+    # Select the Fe 1 and Fe 2 lines for ionization balance.
+    fit_line_group = pysme_abund.find_line_groups(wave, ['Fe'], [1, 2], use_list, v_broad)
+    spec_syn = pysme_abund.get_sensitive_synth(wave, R, teff, logg, monh, vmic, vmac, vsini, line_list, abund, ['Fe'], [1, 2], fit_line_group)
+    fe_lines = pysme_abund.select_lines(fit_line_group, spec_syn, ['Fe'], [1, 2], 
+                                                   sensitivity_dominance_thres=sensitivity_dominance_thres, 
+                                                   line_dominance_thres=line_dominance_thres, 
+                                                   max_line_num=max_line_num)
+    fe_lines['Fe'][1] = fe_lines['Fe'][1].sort_values('wav_s')
+    fe_lines['Fe'][2] = fe_lines['Fe'][2].sort_values('wav_s')
+
+    # Search for the logg which gives ionization balance.
+    # Find the logg range
+    s = Synthesizer()
+    sme = SME_Structure()
+    a = AtmosphereInterpolator(lfs_atmo=s.lfs_atmo)
+    atmo_file = a.lfs_atmo.get(sme.atmo.source)
+    atmo_grid = SavFile(atmo_file, source=sme.atmo.source, lfs=setup_atmo())
+    indices = (np.abs(atmo_grid.teff-teff) < 200) & (np.abs(atmo_grid.monh-monh) < 0.2) 
+    logg_array = np.linspace(min(atmo_grid.logg[indices]), max(atmo_grid.logg[indices]), 7)
+    logg_array, monh_fe12_res_all = measure_logg_fe12(teff, logg_array, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe_lines['Fe'][1], fe_lines['Fe'][2], 
+                                                 use_list)
+    logg, logg_bound = measure_logg_from_p(logg_array, np.array([ele[4] for ele in monh_fe12_res_all]))
+
+    if plot:
+        plt.figure(dpi=150)
+        plt.plot(logg_array, [ele[0] for ele in monh_fe12_res_all], 'o-', label='Fe 1 lines')
+        plt.fill_between(logg_array, [ele[0]-ele[1] for ele in monh_fe12_res_all], [ele[0]+ele[1] for ele in monh_fe12_res_all], alpha=0.1)
+        plt.plot(logg_array, [ele[2] for ele in monh_fe12_res_all], 'o-', label='Fe 2 lines')
+        plt.fill_between(logg_array, [ele[2]-ele[3] for ele in monh_fe12_res_all], [ele[2]+ele[3] for ele in monh_fe12_res_all], alpha=0.1)
+        plt.legend(loc=2)
+        plt.xlabel('$\log{g}$')
+        plt.ylabel('[M/H] (solid)')
+        
+        plt.twinx()
+        plt.plot(logg_array, np.array([ele[4] for ele in monh_fe12_res_all]), 'o--', c='C2') 
+        plt.axvline(logg, c='C2')
+        plt.axvspan(*logg_bound, facecolor='C2', alpha=0.2)
+        plt.ylabel('T-test $p$ (dashed)')
+        plt.title(f'$\log{{g}}$={logg:.2f}$^{{+{logg_bound[1] - logg:.2f}}}_{{{logg_bound[0] - logg:.2f}}}$')
+        if save_plot is not None:
+            plt.savefig(f'{save_plot}/logg_fe12_measure.png')
+    return logg, logg_bound
+
+#---------------------Vmic+monh-----------------------------
+
+def find_range(arr, threshold=0.05):
+    """
+    从最大值位置开始，向左右扩展，寻找值下降到 threshold 处的范围。
+
+    参数:
+    - arr: np.ndarray, 目标数组
+    - threshold: float, 设定的下降阈值（默认 0.05）
+
+    返回:
+    - left_idx: 下降到 threshold 的左边界索引
+    - right_idx: 下降到 threshold 的右边界索引
+    """
+    # 找到最大值的索引
+    max_idx = np.argmax(arr)
+    
+    # 初始化左右边界索引
+    left_idx, right_idx = max_idx, max_idx
+    
+    # 向左搜索，找到下降到 threshold 的位置
+    while left_idx > 0 and arr[left_idx] > threshold:
+        left_idx -= 1
+    
+    # 向右搜索，找到下降到 threshold 的位置
+    while right_idx < len(arr) - 1 and arr[right_idx] > threshold:
+        right_idx += 1
+    
+    return left_idx, right_idx
+
+def measure_monh_vmic_fe12(teff, logg, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist, nlte=False, margin=2):
+    wlcent, wlcent_mean, EW, monh_measure, monh_err_measure, vmic_measure, vmic_err_measure = [], [], [], [], [], [], []
+    margin = 2
+    
+    sme = SME_Structure()
+    sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
+    sme.iptype = 'gauss'
+    sme.ipres = 50000
+    sme.cscale_flag = 'constant'
+    
+    sub_sme = []
+    fit_paras, fit_bounds = ['monh', 'vmic'], [[-1, 0], [0.8, 4]]
+    for i in tqdm(fe1_lines.index):
+        line_wav = fe1_lines.loc[i, 'wlcent']
+        if type(line_wav) != list:
+            hwhm = (vmac+vsini)/3e5*line_wav
+        else:
+            hwhm = (vmac+vsini)/3e5*line_wav[0]
+    
+        sub_sme_single = deepcopy(sme)
+        if type(line_wav) != list:
+            indices = (wave >= line_wav-2*hwhm) & (wave <= line_wav+2*hwhm)
+        else:
+            indices = (wave >= line_wav[0]-2*hwhm) & (wave <= line_wav[-1]+2*hwhm)
+        sub_sme_single.wave = wave[indices]
+        sub_sme_single.spec = flux[indices]
+        sub_sme_single.uncs = flux_err[indices]
+        sub_sme_single.linelist = linelist[~((linelist['line_range_e'] < sub_sme_single.wave[0][0]) | (linelist['line_range_s'] > sub_sme_single.wave[0][-1]))]
+        sub_sme.append([sub_sme_single, fit_paras, fit_bounds])
+        wlcent.append(line_wav)
+        wlcent_mean.append(np.mean(line_wav))
+    
+    for i in tqdm(fe2_lines.index):
+        line_wav = fe2_lines.loc[i, 'wlcent']
+        if type(line_wav) != list:
+            hwhm = (vmac+vsini)/3e5*line_wav
+        else:
+            hwhm = (vmac+vsini)/3e5*line_wav[0]
+    
+        sub_sme_single = deepcopy(sme)
+        if type(line_wav) != list:
+            indices = (wave >= line_wav-2*hwhm) & (wave <= line_wav+2*hwhm)
+        else:
+            indices = (wave >= line_wav[0]-2*hwhm) & (wave <= line_wav[-1]+2*hwhm)
+        sub_sme_single.wave = wave[indices]
+        sub_sme_single.spec = flux[indices]
+        sub_sme_single.uncs = flux_err[indices]
+        sub_sme_single.linelist = linelist[~((linelist['line_range_e'] < sub_sme_single.wave[0][0]) | (linelist['line_range_s'] > sub_sme_single.wave[0][-1]))]
+        sub_sme.append([sub_sme_single, fit_paras, fit_bounds])
+        wlcent.append(line_wav)
+        wlcent_mean.append(np.mean(line_wav))
+
+    sub_sme = pqdm(sub_sme, mv_fit, n_jobs=10, argument_type='args')
+    mv_measure = pd.DataFrame({'wlcent':wlcent, 'wlcent_mean':wlcent_mean, 
+                  'EW':[np.sum(1 - sub_sme_single.synth[0]) * np.mean(np.diff(sub_sme_single.wave[0])) for sub_sme_single in sub_sme], 
+                  'monh':[sub_sme_single.fitresults['values'][0] for sub_sme_single in sub_sme], 
+                  'monh_err':[sub_sme_single.fitresults['fit_uncertainties'][0] for sub_sme_single in sub_sme],
+                  'vmic':[sub_sme_single.fitresults['values'][1] for sub_sme_single in sub_sme], 
+                  'vmic_err':[sub_sme_single.fitresults['fit_uncertainties'][0] for sub_sme_single in sub_sme]})
+    return mv_measure
+
+def measure_vmic(teff, logg, monh, vmic_array, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist, p_threshold=0.05, vmic_diff=0.05):
+
+    slope_all, p_values, monh_all, monh_err_all = [], [], [], []
+    #Run measure_monh_fe12 for the logg_array
+    for vmic in tqdm(vmic_array):
+        monh_fe12_res = pd.concat(measure_monh_fe12(teff, logg, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist)[5:]).reset_index(drop=True)
+        indices = (monh_fe12_res['monh_err'] < np.median(monh_fe12_res['monh_err'])+np.std(monh_fe12_res['monh_err'])) & (monh_fe12_res['EW'] > 10/1000)
+        # Perform weighted linear fitting
+        x, y = monh_fe12_res.loc[indices, 'log(EW/wlcent)'].values, monh_fe12_res.loc[indices, 'monh'].values
+        yerr = monh_fe12_res.loc[indices, 'monh_err'].values    
+        fit_res = linregress(x, y)
+        weights = 1/yerr**2
+        monh_mean = np.average(y, weights=weights)
+        monh_mean_err = np.std(y)
+        monh_all.append(monh_mean)
+        monh_err_all.append(monh_mean_err)
+        slope_all.append(fit_res[0])
+        p_values.append(fit_res[3])
+
+    if np.all(np.array(p_values) < 0.05):
+        # Find the slope 0 using linear interpolation
+        print("Didn't find vmic with p-value > 0.05, find it from 0 slope.")
+        interp_x = np.linspace(0, 4, 100)
+        interp_y = np.abs(np.interp(interp_x, vmic_array, slope_all))
+        min_slope_vmic = interp_x[np.argmin(interp_y)]
+        monh_fe12_res = pd.concat(measure_monh_fe12(teff, logg, monh, min_slope_vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist)[5:]).reset_index(drop=True)
+        indices = (monh_fe12_res['monh_err'] < np.median(monh_fe12_res['monh_err'])+np.std(monh_fe12_res['monh_err'])) & (monh_fe12_res['EW'] > 10/1000)
+        # Perform weighted linear fitting
+        x, y = monh_fe12_res.loc[indices, 'log(EW/wlcent)'].values, monh_fe12_res.loc[indices, 'monh'].values
+        yerr = monh_fe12_res.loc[indices, 'monh_err'].values    
+        fit_res = linregress(x, y)
+        weights = 1/yerr**2
+        monh_mean = np.average(y, weights=weights)
+        monh_mean_err = np.std(y)
+        
+        print(min_slope_vmic)
+        vmic_array = np.concatenate([vmic_array, [min_slope_vmic]])
+        monh_all.append(monh_mean)
+        monh_err_all.append(monh_mean_err)
+        slope_all.append(fit_res[0])
+        p_values.append(fit_res[3])
+
+    # print(vmic_array)
+    # print(p_values)
+    sorted_indices = np.argsort(vmic_array)
+    vmic_array = vmic_array[sorted_indices]
+    monh_all = list(np.array(monh_all)[sorted_indices])
+    monh_err_all = list(np.array(monh_err_all)[sorted_indices])
+    slope_all = list(np.array(slope_all)[sorted_indices])
+    p_values = list(np.array(p_values)[sorted_indices])
+    # pickle.dump([vmic_array, monh_all, monh_err_all, slope_all, p_values], open('temp.pkl', 'wb'))
+    # return vmic_array, monh_all, monh_err_all, slope_all, p_values
+    # print(vmic_array)
+    # print(p_values)
+    
+    # Refine sampling： Insert grid points between p_value threshold
+    mask = np.array(p_values) > p_threshold
+    start_index, end_index = -99, -99
+    if np.any(mask):
+        start_index = np.where(mask)[0][0]  # 第一个超过阈值的位置
+        if start_index != 0:
+            start_index -= 1
+        end_index = np.where(mask)[0][-1]  # 最后一个超过阈值的位置
+        if end_index != len(vmic_array)-1:
+            end_index += 1
+    elif ~np.any(mask) and np.max(p_values) <= p_threshold:
+        max_index = np.argmax(p_values)
+        p_values_exclude_max = np.delete(p_values, max_index)
+        # 找到新数组中最大值的索引
+        second_max_index_in_reduced = np.argmax(p_values_exclude_max)
+        # 转换回原数组中的索引
+        second_max_index = np.arange(len(p_values))[np.arange(len(p_values)) != max_index][second_max_index_in_reduced]
+        if max_index > second_max_index:
+            start_index, end_index = second_max_index, max_index
+        else:
+            start_index, end_index = max_index, second_max_index
+            
+    if start_index != -99 and end_index != -99:
+        # 加密采样区间
+        fine_vmic = np.arange(vmic_array[start_index], vmic_array[end_index] + vmic_diff, vmic_diff)
+        print(start_index, end_index)
+        print(vmic_array[start_index], vmic_array[end_index])
+        print(fine_vmic)
+        fine_monh_fe12 = [measure_monh_fe12(teff, logg, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist)[5:] for vmic in tqdm(fine_vmic)]
+        for fine_monh_fe12_single in fine_monh_fe12:
+            monh_fe12_res = pd.concat(fine_monh_fe12_single).reset_index(drop=True)
+            indices = (monh_fe12_res['monh_err'] < np.median(monh_fe12_res['monh_err'])+np.std(monh_fe12_res['monh_err'])) & (monh_fe12_res['EW'] > 10/1000)
+            # Perform weighted linear fitting
+            x, y = monh_fe12_res.loc[indices, 'log(EW/wlcent)'].values, monh_fe12_res.loc[indices, 'monh'].values
+            yerr = monh_fe12_res.loc[indices, 'monh_err'].values    
+            fit_res = linregress(x, y)
+            weights = 1/yerr**2
+            monh_mean = np.average(y, weights=weights)
+            monh_mean_err = np.std(y)
+            monh_all.append(monh_mean)
+            monh_err_all.append(monh_mean_err)
+            slope_all.append(fit_res[0])
+            p_values.append(fit_res[3])
+        # 合并采样点
+        vmic_array = np.concatenate([vmic_array, fine_vmic])
+        
+    vmic_df = pd.DataFrame({'vmic':vmic_array, 'slope':slope_all, 'p_value':p_values, 
+                        'monh':monh_all, 'monh_err':monh_err_all})
+    vmic_df = vmic_df.sort_values('vmic').drop_duplicates('vmic')
+
+    return vmic_df
+
+def measure_vmic_main(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, R, line_list,
+                      vmic_array=np.linspace(0, 4, 6),
+                           abund=None, 
+                           sensitivity_dominance_thres=0.6,
+                           line_dominance_thres=0.5,
+                           max_line_num=50,
+                           plot=False, save_plot=None):
+
+    if abund is None:
+        abund = Abund.solar()
+        abund.monh = monh
+        
+    if not {'central_depth', 'line_range_s', 'line_range_e'}.issubset(line_list._lines.columns) or np.abs(line_list.cdepth_range_paras[0]-teff) >= 500 or (np.abs(line_list.cdepth_range_paras[1]-logg) >= 1) or (np.abs(line_list.cdepth_range_paras[2]-monh) >= 0.5):
+        # Calculate the line depth from the pre-set stellar parameter
+        sme = SME_Structure()
+        sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
+        sme.abund = abund
+        use_list = pysme_synth.get_cdepth_range(sme, line_list, parallel=True, n_jobs=10)
+        use_list = use_list[use_list['central_depth'] > 0.1]
+    else:
+        use_list = line_list[line_list['central_depth'] > 0.1]
+
+    v_broad = np.sqrt(vmic**2 + vmac**2 + vsini**2 + (3e5/R)**2)
+
+    # Determine logg using ionization balance.
+    fit_line_group = pysme_abund.find_line_groups(wave, ['Fe'], [1, 2], line_list, v_broad)
+    spec_syn = pysme_abund.get_sensitive_synth(wave, R, teff, logg, monh, vmic, vmac, vsini, line_list, abund, ['Fe'], [1, 2], fit_line_group)
+    fe_lines = pysme_abund.select_lines(fit_line_group, spec_syn, ['Fe'], [1, 2], 
+                                                   sensitivity_dominance_thres=sensitivity_dominance_thres, 
+                                                   line_dominance_thres=line_dominance_thres, 
+                                                   max_line_num=max_line_num)
+    fe_lines['Fe'][1] = fe_lines['Fe'][1].sort_values('wav_s')
+    fe_lines['Fe'][2] = fe_lines['Fe'][2].sort_values('wav_s')
+
+    vmic_df = measure_vmic(teff, logg, monh, vmic_array, vmac, vsini, R, wave, flux, flux_err, fe_lines['Fe'][1], fe_lines['Fe'][2], line_list)
+
+    # Get the vmic from 
+    vmic_measure = vmic_df.loc[vmic_df['p_value'].idxmax(), 'vmic']
+    vmic_inerp = np.linspace(np.min(vmic_df['vmic']), np.max(vmic_df['vmic']), 500)
+    p_value_interp = np.interp(vmic_inerp, vmic_df['vmic'], vmic_df['p_value'])
+    vmic_bound = [vmic_inerp[ele] for ele in find_range(p_value_interp)]
+    monh = vmic_df.loc[vmic_df['p_value'].idxmax(), 'monh']
+    monh_err = vmic_df.loc[vmic_df['p_value'].idxmax(), 'monh_err']
+    vmic = vmic_measure
+
+    if plot:
+        plt.plot(vmic_df['vmic'], vmic_df['slope'], 'o-')
+        plt.twinx()
+        plt.plot(vmic_df['vmic'], vmic_df['p_value'], 'o-', c='C1')
+        
+        plt.axvline(vmic_measure)
+        plt.axvspan(*vmic_bound, alpha=0.2)
+        plt.title(f'$v_\mathrm{{mic}}$={vmic_measure:.2f}$^{{+{vmic_bound[1] - vmic_measure:.2f}}}_{{{vmic_bound[0] - vmic_measure:.2f}}}$')
+        if save_plot is not None:
+            plt.savefig(f'{save_plot}/logg_fe12_measure.png')
+
+    return vmic, vmic_bound, monh, monh_err
+
+#---------------------vmac/vsini-----------------------------
+
+def measure_vsini_main(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, R, line_list,
+                           abund=None, 
+                           sensitivity_dominance_thres=0.6,
+                           line_dominance_thres=0.5,
+                           max_line_num=50,
+                           plot=False, save_plot=None):
+
+    if abund is None:
+        abund = Abund.solar()
+        abund.monh = monh
+        
+    if not {'central_depth', 'line_range_s', 'line_range_e'}.issubset(line_list._lines.columns) or np.abs(line_list.cdepth_range_paras[0]-teff) >= 500 or (np.abs(line_list.cdepth_range_paras[1]-logg) >= 1) or (np.abs(line_list.cdepth_range_paras[2]-monh) >= 0.5):
+        # Calculate the line depth from the pre-set stellar parameter
+        sme = SME_Structure()
+        sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
+        sme.abund = abund
+        use_list = pysme_synth.get_cdepth_range(sme, line_list, parallel=True, n_jobs=10)
+        use_list = use_list[use_list['central_depth'] > 0.1]
+    else:
+        use_list = line_list[line_list['central_depth'] > 0.1]
+
+    v_broad = np.sqrt(vmic**2 + vmac**2 + vsini**2 + (3e5/R)**2)
+
+    # Find all the Fe 1 and Fe 2 lines
+    fit_line_group = pysme_abund.find_line_groups(wave, ['Fe'], [1, 2], line_list, v_broad)
+    spec_syn = pysme_abund.get_sensitive_synth(wave, R, teff, logg, monh, vmic, vmac, vsini, line_list, abund, ['Fe'], [1, 2], fit_line_group)
+    fe_lines = pysme_abund.select_lines(fit_line_group, spec_syn, ['Fe'], [1, 2], 
+                                                   sensitivity_dominance_thres=sensitivity_dominance_thres, 
+                                                   line_dominance_thres=line_dominance_thres, 
+                                                   max_line_num=max_line_num)
+    fe_lines['Fe'][1] = fe_lines['Fe'][1].sort_values('wav_s').reset_index(drop=True)
+    fe_lines['Fe'][2] = fe_lines['Fe'][2].sort_values('wav_s').reset_index(drop=True)
+
+    wlcent, EW, vmac_measure, vmac_err_measure, vsini_measure, vsini_err_measure = [], [], [], [], [], []
+
+    sme = SME_Structure()
+    sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
+    sme.iptype = 'gauss'
+    sme.ipres = R
+
+    sub_sme = []
+    fit_paras, fit_bounds = ['vsini'], [0, 50]
+    for i in tqdm(fe_lines['Fe'][1].index):
+        line_wav = fe_lines['Fe'][1].loc[i, 'wlcent']
+        if type(line_wav) != list:
+            hwhm = (vmac+vsini)/3e5*line_wav
+        else:
+            hwhm = (vmac+vsini)/3e5*line_wav[0]
+    
+        sub_sme_single = deepcopy(sme)
+        if type(line_wav) != list:
+            indices = (wave >= line_wav-2*hwhm) & (wave <= line_wav+2*hwhm)
+        else:
+            indices = (wave >= line_wav[0]-2*hwhm) & (wave <= line_wav[-1]+2*hwhm)
+        sub_sme_single.wave = wave[indices]
+        sub_sme_single.spec = flux[indices]
+        sub_sme_single.uncs = flux_err[indices]
+        sub_sme_single.linelist = use_list[~((use_list['line_range_e'] < sub_sme_single.wave[0][0]) | (use_list['line_range_s'] > sub_sme_single.wave[0][-1]))]
+        sub_sme.append([sub_sme_single, fit_paras, fit_bounds])
+        wlcent.append(line_wav)
+        # wlcent_mean.append(np.mean(line_wav))
+    
+    for i in tqdm(fe_lines['Fe'][2].index):
+        line_wav = fe_lines['Fe'][2].loc[i, 'wlcent']
+        if type(line_wav) != list:
+            hwhm = (vmac+vsini)/3e5*line_wav
+        else:
+            hwhm = (vmac+vsini)/3e5*line_wav[0]
+    
+        sub_sme_single = deepcopy(sme)
+        if type(line_wav) != list:
+            indices = (wave >= line_wav-2*hwhm) & (wave <= line_wav+2*hwhm)
+        else:
+            indices = (wave >= line_wav[0]-2*hwhm) & (wave <= line_wav[-1]+2*hwhm)
+        sub_sme_single.wave = wave[indices]
+        sub_sme_single.spec = flux[indices]
+        sub_sme_single.uncs = flux_err[indices]
+        sub_sme_single.linelist = use_list[~((use_list['line_range_e'] < sub_sme_single.wave[0][0]) | (use_list['line_range_s'] > sub_sme_single.wave[0][-1]))]
+        sub_sme.append([sub_sme_single, fit_paras, fit_bounds])
+        wlcent.append(line_wav)
+        # wlcent_mean.append(np.mean(line_wav))
+
+    sub_sme = pqdm(sub_sme, mv_fit, n_jobs=10, argument_type='args')
+    vsini_measure = pd.DataFrame({'wlcent':wlcent, 
+                'EW':[np.sum(1 - sub_sme_single.synth[0]) * np.mean(np.diff(sub_sme_single.wave[0])) for sub_sme_single in sub_sme], 
+                # 'vmac':[sub_sme_single.fitresults['values'][0] for sub_sme_single in sub_sme], 
+                # 'vmac_err':[sub_sme_single.fitresults['fit_uncertainties'][0] for sub_sme_single in sub_sme],
+                'vsini':[sub_sme_single.fitresults['values'][0] for sub_sme_single in sub_sme], 
+                'vsini_err':[sub_sme_single.fitresults['fit_uncertainties'][0] for sub_sme_single in sub_sme]})
+    
+    linear_fit = np.polyfit(vsini_measure['EW'], vsini_measure['vsini'], 1)
+    scatter = np.std(vsini_measure['vsini'] - np.polyval(linear_fit, vsini_measure['EW']))
+    indices = (np.abs(vsini_measure['vsini'] - np.polyval(linear_fit, vsini_measure['EW'])) <= 2*scatter)
+    vsini_mean = np.mean(vsini_measure.loc[indices, 'vsini'])
+    scatter = np.std(vsini_measure.loc[indices, 'vsini'])
+
+    if plot:
+        plt.figure(figsize=(13/2, 3), dpi=150)
+        
+        plt.scatter(vsini_measure['EW'], vsini_measure['vsini'], s=5)
+        plt.scatter(vsini_measure.loc[~indices, 'EW'], vsini_measure.loc[~indices, 'vsini'], c='red', marker='x', s=10)
+
+        plt.axhline(vsini_mean, ls='--', c='C1')
+        plt.xlabel('EW (AA)')
+        plt.ylabel('Vsini (km/s)')
+        plt.title(f'Vsini={vsini_mean:.2f}$\pm${scatter:.2f} km/s')
+
+        if save_plot is not None:
+            plt.savefig(f'{save_plot}/vsini_measure.png')
+
+    return vsini_mean, scatter, vsini_measure
 
 def pysme_para_main(wav_obs, flux_obs, flux_err_obs, R, s_n, line_list, teff_init, logg_init, monh_init, vmic_init, vmac_init, vsini_init, ion_list=['Fe 1', 'Fe 2'], spec_margin=0.2, linelist_margin=2):
     
