@@ -157,3 +157,60 @@ def sigma_clip(data, sigma=3.0, max_iters=None, return_mask=False):
         return mask  # 返回布尔掩码
     else:
         return data[mask]  # 返回剔除异常值后的数据
+
+def detect_peak_regions(data, peak_thresh, valley_thresh):
+    """
+    当某个峰值高于 peak_thresh，就从该峰向两边扩展直到数据低于 valley_thresh。
+    输出一个 bool mask：峰值范围为 False，其他为 True。
+    """
+    data = np.asarray(data)
+    mask = np.ones_like(data, dtype=bool)  # 初始化全部为 True
+    
+    i = 0
+    while i < len(data):
+        if data[i] > peak_thresh:
+            # 向左扩展
+            left = i
+            while left > 0 and data[left] > valley_thresh:
+                left -= 1
+            # 向右扩展
+            right = i
+            while right < len(data) - 1 and data[right] > valley_thresh:
+                right += 1
+            # 设置峰值区域为 False
+            mask[left+1:right] = False
+            i = right  # 跳过这个区域，加快处理
+        else:
+            i += 1
+
+    return mask
+
+def get_false_regions_wavelengths(wavelengths, mask):
+    """
+    根据布尔 mask 提取所有 mask 为 False 的波长段范围。
+    每段的起止点由 True/False 转换点的波长平均值得到。
+    
+    返回：[[start1, end1], [start2, end2], ...]
+    """
+    wavelengths = np.asarray(wavelengths)
+    mask = np.asarray(mask)
+
+    # 检测边界转换点：True→False 为起点，False→True 为终点
+    diff = np.diff(mask.astype(int))
+    starts = np.where(diff == -1)[0]  # True → False
+    ends = np.where(diff == 1)[0]     # False → True
+
+    # 边界特殊情况：开头或结尾是 False 的情况
+    if not mask[0]:
+        starts = np.insert(starts, 0, -1)
+    if not mask[-1]:
+        ends = np.append(ends, len(mask) - 1)
+
+    # 计算平均波长作为边界
+    regions = []
+    for s, e in zip(starts, ends):
+        wl_start = (wavelengths[s] + wavelengths[s + 1]) / 2 if s >= 0 else wavelengths[0]
+        wl_end   = (wavelengths[e] + wavelengths[e + 1]) / 2 if e + 1 < len(wavelengths) else wavelengths[-1]
+        regions.append([wl_start, wl_end])
+
+    return regions

@@ -263,9 +263,9 @@ def para_first_estimate(wav, flux, flux_err):
 
     # Todo: if the template is specified, broaden them according to R and V_broad.
     
-#------------------Teff------------------
+#----------------Overall fitting----------------
 
-def measure_teff_fe1(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, R, line_list, abund=None):
+def measure_para(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, R, line_list, ele_list, ion_list, fit_para=['teff'], abund=None, nlte=False, selected_lines_save=False, selected_lines_file=None, line_mask_remove=None, max_line_num=50):
     '''
     Measure Teff from Fe 1 lines.
     '''
@@ -275,9 +275,81 @@ def measure_teff_fe1(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, 
         abund = Abund.solar()
         abund.monh = monh
 
+    if not {'central_depth', 'line_range_s', 'line_range_e'}.issubset(line_list._lines.columns) or np.abs(line_list.cdepth_range_paras[0]-teff) >= 500 or (np.abs(line_list.cdepth_range_paras[1]-logg) >= 1) or (np.abs(line_list.cdepth_range_paras[2]-monh) >= 0.5):
+        # Calculate the line depth from the pre-set stellar parameter
+        sme = SME_Structure()
+        sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
+        sme.abund = abund
+        use_list = pysme_synth.get_cdepth_range(sme, line_list, parallel=True, n_jobs=10)
+        use_list = use_list[use_list['central_depth'] > 0.1]
+    else:
+        use_list = line_list[line_list['central_depth'] > 0.1]
+
     # Select the Fe 1 and Fe 2 lines according to the current stellar parameters
-    fit_line_group = pysme_abund.find_line_groups(wave, ['Fe'], [1], line_list, v_broad)
-    spec_syn = pysme_abund.get_sensitive_synth(wave, R, teff, logg, monh, vmic, vmac, vsini, line_list, abund, ['Fe'], [1], fit_line_group)
+    fit_line_group = pysme_abund.find_line_groups(wave, ele_list, ion_list, use_list, v_broad, loggf_cut=-2, line_mask_remove=line_mask_remove)
+    spec_syn = pysme_abund.get_sensitive_synth(wave, R, teff, logg, monh, vmic, vmac, vsini, use_list, abund, ele_list, ion_list, fit_line_group)
+    selected_lines = pysme_abund.select_lines(fit_line_group, spec_syn, ele_list, ion_list, sensitivity_dominance_thres=0.6, line_dominance_thres=0.5, max_line_num=max_line_num)
+    
+    if selected_lines_save and selected_lines_file is not None:
+        pickle.dump(selected_lines, open(selected_lines_file, 'wb'))
+
+    wav_range_list = []
+    for key in selected_lines.keys():
+        for ion in selected_lines[key]:
+            selected_lines[key][ion] = selected_lines[key][ion].sort_values('wav_s')
+            wav_range_list += [[selected_lines[key][ion].loc[i, 'wav_s'], selected_lines[key][ion].loc[i, 'wav_e']] for i in selected_lines[key][ion].index]
+
+    # Select the line region for Teff fitting.
+    # wav_range_list = [[fit_line_group['Fe'][1].loc[i, 'wav_s'], fit_line_group['Fe'][1].loc[i, 'wav_e']] for i in fit_line_group['Fe'][1].index]
+    
+    wave_fit = []
+    flux_fit = []
+    flux_err_fit = []
+    for wav_range in wav_range_list:
+        indices = (wave >= wav_range[0]) & (wave < wav_range[1])
+        wave_fit.append(wave[indices])
+        flux_fit.append(flux[indices])
+        flux_err_fit.append(flux_err[indices])
+
+    sme = SME_Structure()
+    sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
+    sme.iptype = 'gauss'
+    sme.ipres = R
+    if nlte:
+        sme.nlte.set_nlte('Fe')
+    sme.wave = wave_fit
+    sme.spec = flux_fit
+    sme.uncs = flux_err_fit
+    sme.linelist = use_list
+    sme = solve(sme, fit_para, linelist_mode='auto')
+    
+    return sme
+
+#------------------Teff------------------
+
+def measure_teff_fe1(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, R, line_list, fit_para=['teff'], abund=None):
+    '''
+    Measure Teff from Fe 1 lines.
+    '''
+
+    v_broad = np.sqrt(vmic**2 + vmac**2 + vsini**2 + (3e5/R)**2)
+    if abund is None:
+        abund = Abund.solar()
+        abund.monh = monh
+
+    if not {'central_depth', 'line_range_s', 'line_range_e'}.issubset(line_list._lines.columns) or np.abs(line_list.cdepth_range_paras[0]-teff) >= 500 or (np.abs(line_list.cdepth_range_paras[1]-logg) >= 1) or (np.abs(line_list.cdepth_range_paras[2]-monh) >= 0.5):
+        # Calculate the line depth from the pre-set stellar parameter
+        sme = SME_Structure()
+        sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, monh, vmic, vmac, vsini
+        sme.abund = abund
+        use_list = pysme_synth.get_cdepth_range(sme, line_list, parallel=True, n_jobs=10)
+        use_list = use_list[use_list['central_depth'] > 0.1]
+    else:
+        use_list = line_list[line_list['central_depth'] > 0.1]
+
+    # Select the Fe 1 and Fe 2 lines according to the current stellar parameters
+    fit_line_group = pysme_abund.find_line_groups(wave, ['Fe'], [1], use_list, v_broad)
+    spec_syn = pysme_abund.get_sensitive_synth(wave, R, teff, logg, monh, vmic, vmac, vsini, use_list, abund, ['Fe'], [1], fit_line_group)
     fe_lines = pysme_abund.select_lines(fit_line_group, spec_syn, ['Fe'], [1], sensitivity_dominance_thres=0.6, line_dominance_thres=0.5, max_line_num=50)
     fe_lines['Fe'][1] = fe_lines['Fe'][1].sort_values('wav_s')
 
@@ -300,12 +372,18 @@ def measure_teff_fe1(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, 
     sme.wave = wave_fit
     sme.spec = flux_fit
     sme.uncs = flux_err_fit
-    sme.linelist = line_list
-    sme = solve(sme, ['teff'], linelist_mode='auto')
+    sme.linelist = use_list
+    sme = solve(sme, fit_para, linelist_mode='auto')
+
+    return sme
 
     teff = sme.fitresults.values[0]
     teff_error = sme.fitresults.uncertainties[0]
     teff_fit_error = sme.fitresults.fit_uncertainties[0]
+    vmic = sme.fitresults.values[1]
+    vmic_error = sme.fitresults.uncertainties[1]
+    vmic_fit_error = sme.fitresults.fit_uncertainties[1]
+
     return teff, teff_error, teff_fit_error
 
 #------------------logg------------------
@@ -726,13 +804,9 @@ def measure_logg_fe12(teff, logg_array, monh, vmic, vmac, vsini, R, wave, flux, 
     logg_1st_est = logg_interp[np.argmin(np.abs(del_monh_interp))]
     print('Best logg: ', logg_1st_est)
     monh_fe12_res = measure_monh_fe12(teff, logg_1st_est, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist)
-    print(monh_fe12_res)
-    print(monh_fe12_res[4])
     logg_array = np.concatenate([logg_array, [logg_1st_est]])
     monh_fe12_res_all.append(monh_fe12_res)
-    print('p_values:', p_values)
     p_values = np.concatenate([p_values, [monh_fe12_res[4]]])
-    print('p_values:', p_values)
 
     unique_indices = np.unique(logg_array, return_index=True)[1]
     # 根据索引重新排列 x 和 y
@@ -743,12 +817,7 @@ def measure_logg_fe12(teff, logg_array, monh, vmic, vmac, vsini, R, wave, flux, 
     # Measure logg from monh_fe12_res_all
     mask = p_values > p_threshold
     start_index, end_index = -99, -99
-    print('Test test.')
-    print(p_values, p_threshold)
-    print(start_index, end_index)
-    print(mask)
     if np.any(mask):
-        print('Here here')
         start_index = np.where(mask)[0][0]  # 第一个超过阈值的位置
         if start_index != 0:
             start_index -= 1
@@ -757,7 +826,6 @@ def measure_logg_fe12(teff, logg_array, monh, vmic, vmac, vsini, R, wave, flux, 
             end_index += 1
     # elif ~np.any(mask) and np.max(p_values) <= p_threshold:
     else:
-        print('There there')
         max_index = np.argmax(p_values)
         p_values_exclude_max = np.delete(p_values, max_index)
         # 找到新数组中最大值的索引
@@ -772,7 +840,7 @@ def measure_logg_fe12(teff, logg_array, monh, vmic, vmac, vsini, R, wave, flux, 
     if start_index != -99 and end_index != -99:
         # 加密采样区间
         fine_logg = np.arange(logg_array[start_index], logg_array[end_index] + logg_diff, logg_diff)
-        print('Find logg created:', fine_logg, start_index, end_index, logg_array[start_index], logg_array[end_index])
+        print('Find logg created:', fine_logg)
         fine_monh_fe12 = [measure_monh_fe12(teff, logg, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist) for logg in tqdm(fine_logg)]
         # return monh_fe12_res_all, fine_monh_fe12
         # 合并采样点
@@ -971,13 +1039,13 @@ def measure_monh_vmic_fe12(teff, logg, monh, vmic, vmac, vsini, R, wave, flux, f
                   'vmic_err':[sub_sme_single.fitresults['fit_uncertainties'][0] for sub_sme_single in sub_sme]})
     return mv_measure
 
-def measure_vmic(teff, logg, monh, vmic_array, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist, p_threshold=0.05, vmic_diff=0.05):
+def measure_vmic(teff, logg, monh, vmic_array, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist, p_threshold=0.05, vmic_diff=0.15, EW_thres=0):
 
     slope_all, p_values, monh_all, monh_err_all = [], [], [], []
     #Run measure_monh_fe12 for the logg_array
     for vmic in tqdm(vmic_array):
         monh_fe12_res = pd.concat(measure_monh_fe12(teff, logg, monh, vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist)[5:]).reset_index(drop=True)
-        indices = (monh_fe12_res['monh_err'] < np.median(monh_fe12_res['monh_err'])+np.std(monh_fe12_res['monh_err'])) & (monh_fe12_res['EW'] > 10/1000)
+        indices = (monh_fe12_res['monh_err'] < np.median(monh_fe12_res['monh_err'])+np.std(monh_fe12_res['monh_err'])) & (monh_fe12_res['EW'] > EW_thres/1000)
         # Perform weighted linear fitting
         x, y = monh_fe12_res.loc[indices, 'log(EW/wlcent)'].values, monh_fe12_res.loc[indices, 'monh'].values
         yerr = monh_fe12_res.loc[indices, 'monh_err'].values    
@@ -990,31 +1058,57 @@ def measure_vmic(teff, logg, monh, vmic_array, vmac, vsini, R, wave, flux, flux_
         slope_all.append(fit_res[0])
         p_values.append(fit_res[3])
 
-    if np.all(np.array(p_values) < 0.05):
-        # Find the slope 0 using linear interpolation
-        print("Didn't find vmic with p-value > 0.05, find it from 0 slope.")
-        interp_x = np.linspace(0, 4, 100)
-        interp_y = np.abs(np.interp(interp_x, vmic_array, slope_all))
-        min_slope_vmic = interp_x[np.argmin(interp_y)]
-        monh_fe12_res = pd.concat(measure_monh_fe12(teff, logg, monh, min_slope_vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist)[5:]).reset_index(drop=True)
-        indices = (monh_fe12_res['monh_err'] < np.median(monh_fe12_res['monh_err'])+np.std(monh_fe12_res['monh_err'])) & (monh_fe12_res['EW'] > 10/1000)
-        # Perform weighted linear fitting
-        x, y = monh_fe12_res.loc[indices, 'log(EW/wlcent)'].values, monh_fe12_res.loc[indices, 'monh'].values
-        yerr = monh_fe12_res.loc[indices, 'monh_err'].values    
-        fit_res = linregress(x, y)
-        weights = 1/yerr**2
-        monh_mean = np.average(y, weights=weights)
-        monh_mean_err = np.std(y)
+    # if np.all(np.array(p_values) < 0.05):
+    #     # Find the slope 0 using linear interpolation
+    #     print("Didn't find vmic with p-value > 0.05, find it from 0 slope.")
+    #     interp_x = np.linspace(0, 4, 100)
+    #     interp_y = np.abs(np.interp(interp_x, vmic_array, slope_all))
+    #     min_slope_vmic = interp_x[np.argmin(interp_y)]
+    #     monh_fe12_res = pd.concat(measure_monh_fe12(teff, logg, monh, min_slope_vmic, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist)[5:]).reset_index(drop=True)
+    #     indices = (monh_fe12_res['monh_err'] < np.median(monh_fe12_res['monh_err'])+np.std(monh_fe12_res['monh_err'])) & (monh_fe12_res['EW'] > 10/1000)
+    #     # Perform weighted linear fitting
+    #     x, y = monh_fe12_res.loc[indices, 'log(EW/wlcent)'].values, monh_fe12_res.loc[indices, 'monh'].values
+    #     yerr = monh_fe12_res.loc[indices, 'monh_err'].values    
+    #     fit_res = linregress(x, y)
+    #     weights = 1/yerr**2
+    #     monh_mean = np.average(y, weights=weights)
+    #     monh_mean_err = np.std(y)
         
-        print(min_slope_vmic)
-        vmic_array = np.concatenate([vmic_array, [min_slope_vmic]])
-        monh_all.append(monh_mean)
-        monh_err_all.append(monh_mean_err)
-        slope_all.append(fit_res[0])
-        p_values.append(fit_res[3])
+    #     print(min_slope_vmic)
+    #     vmic_array = np.concatenate([vmic_array, [min_slope_vmic]])
+    #     monh_all.append(monh_mean)
+    #     monh_err_all.append(monh_mean_err)
+    #     slope_all.append(fit_res[0])
+    #     p_values.append(fit_res[3])
 
-    # print(vmic_array)
-    # print(p_values)
+    # Refine sampling： Insert grid points between p_value threshold
+    vmic_interp = np.linspace(np.min(vmic_array), np.max(vmic_array), 500)
+    slope_interp = np.interp(vmic_interp, vmic_array, slope_all)
+    vmic_1st_est = vmic_interp[np.argmin(np.abs(slope_interp))]
+    print('Best vmic: ', vmic_1st_est)
+    monh_fe12_res = pd.concat(measure_monh_fe12(teff, logg, monh, vmic_1st_est, vmac, vsini, R, wave, flux, flux_err, fe1_lines, fe2_lines, linelist)[5:]).reset_index(drop=True)
+    indices = (monh_fe12_res['monh_err'] < np.median(monh_fe12_res['monh_err'])+np.std(monh_fe12_res['monh_err'])) & (monh_fe12_res['EW'] > 10/1000)
+    # Perform weighted linear fitting
+    x, y = monh_fe12_res.loc[indices, 'log(EW/wlcent)'].values, monh_fe12_res.loc[indices, 'monh'].values
+    yerr = monh_fe12_res.loc[indices, 'monh_err'].values
+    fit_res = linregress(x, y)
+    weights = 1/yerr**2
+    monh_mean = np.average(y, weights=weights)
+    monh_mean_err = np.std(y)
+    vmic_array = np.concatenate([vmic_array, [vmic_1st_est]])
+    monh_all.append(monh_mean)
+    monh_err_all.append(monh_mean_err)
+    slope_all.append(fit_res[0])
+    p_values.append(fit_res[3])
+
+    unique_indices = np.unique(vmic_array, return_index=True)[1]
+    # 根据索引重新排列 x 和 y
+    vmic_array = vmic_array[unique_indices]
+    p_values = np.array(p_values)[unique_indices]
+    slope_all = np.array(slope_all)[unique_indices]
+    monh_all = np.array(monh_all)[unique_indices]
+    monh_err_all = np.array(monh_err_all)[unique_indices]
+
     sorted_indices = np.argsort(vmic_array)
     vmic_array = vmic_array[sorted_indices]
     monh_all = list(np.array(monh_all)[sorted_indices])
@@ -1026,6 +1120,9 @@ def measure_vmic(teff, logg, monh, vmic_array, vmac, vsini, R, wave, flux, flux_
     # print(vmic_array)
     # print(p_values)
     
+    print(vmic_array)
+    print(slope_all)
+    print(p_values)
     # Refine sampling： Insert grid points between p_value threshold
     mask = np.array(p_values) > p_threshold
     start_index, end_index = -99, -99
@@ -1124,6 +1221,7 @@ def measure_vmic_main(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini,
     vmic = vmic_measure
 
     if plot:
+        plt.figure()
         plt.plot(vmic_df['vmic'], vmic_df['slope'], 'o-')
         plt.twinx()
         plt.plot(vmic_df['vmic'], vmic_df['p_value'], 'o-', c='C1')

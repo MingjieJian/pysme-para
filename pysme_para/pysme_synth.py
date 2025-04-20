@@ -234,13 +234,22 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
     sub_wave_range = [sub_wave_range[i:i+2] for i in range(len(sub_wave_range) - 1)]
     for i in range(len(sub_wave_range)-1):
         sub_wave_range[i+1][0] = sub_wave_range[i][1]
-    sub_wave_range[0][0] = sme.wave[0][0] - 1e-3
-    sub_wave_range[-1][-1] = sme.wave[0][-1] + 1e-3
+    if sub_wave_range[0][0] > sme.wave[0][0]:
+        sub_wave_range[0][0] = sme.wave[0][0]
+    if sub_wave_range[-1][-1] < sme.wave[0][-1]:
+        sub_wave_range[-1][-1] = sme.wave[0][-1]
+    sub_wave_range[0][0] -= 1e-3
+    sub_wave_range[-1][-1] += 1e-3
 
     # Remove the wave ranges with no sme.wave inside 
     sub_wave_range = [ele for ele in sub_wave_range if len(sme.wave[0][(sme.wave[0] >= ele[0]) & (sme.wave[0] < ele[1])]) > 0]
     
     # Combine the sub_wave_range of length <=2 to the previous one.
+    if len(sme.wave[0][(sme.wave >= sub_wave_range[0][0]) & (sme.wave < sub_wave_range[0][1])]) <= 2:
+        sub_wave_range[0] = np.array([sub_wave_range[0][0], sub_wave_range[1][1]])
+        # 从列表中移除下一个元素
+        del sub_wave_range[1]
+
     i = len(sub_wave_range) - 2  # 开始检查的索引
     while i >= 0:
         if len(sme.wave[0][(sme.wave >= sub_wave_range[i+1][0]) & (sme.wave < sub_wave_range[i+1][1])]) <= 2:  # 检查下一个元素的长度
@@ -252,7 +261,7 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
 
     N_chunk = len(sub_wave_range)
 
-    # sub_sme_all = []
+    sub_sme_all = []
     args = []
     for i in tqdm(range(N_chunk)):
         line_wav_start, line_wav_end = sub_wave_range[i]
@@ -264,6 +273,7 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
             sub_sme.linelist = line_list[~((line_list['line_range_e'] < line_wav_start-line_margin) | (line_list['line_range_s'] > line_wav_end+line_margin))]
             # Define the wavelength. Here we extend the wavelength array to include the vsini effect.
             sub_sme.wave = sme.wave[(sme.wave >= wav_start - sub_sme.vsini/3e5*wav_start) & (sme.wave < wav_end + sub_sme.vsini/3e5*wav_start)]
+            # sub_sme.wave = sme.wave[(sme.wave >= wav_start) & (sme.wave < wav_end)]
             if pysme_out:
                 sub_sme = synthesize_spectrum(sub_sme)
             else:
@@ -274,7 +284,7 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
                 wav, flux = sub_sme.wave[0][wav_indices], sub_sme.synth[0][wav_indices]
             else:
                 wav, flux = np.concatenate([wav, sub_sme.wave[0][wav_indices]]), np.concatenate([flux, sub_sme.synth[0][wav_indices]])
-            # sub_sme_all.append(sub_sme)
+            sub_sme_all.append(sub_sme)
 
     if parallel:
         results = Parallel(n_jobs=n_jobs, backend='loky')(delayed(synthesize_spectrum_pqdm)(*ele) for ele in tqdm(args))
@@ -283,13 +293,13 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
         wav = np.concatenate(wav)
         flux = [item[1] for item in results]
         flux = np.concatenate(flux)
-        # sub_sme_all = [item[2] for item in results]
+        sub_sme_all = [item[2] for item in results]
 
     # Merge the spectra
-    if np.all(wav != sme.wave[0]):
+    if np.all(wav != sme.wave[0]):  
         raise ValueError
     
-    return wav, flux
+    return wav, flux 
 
 def synthesize_spectrum_pqdm(sme, line_list, line_wav_start, line_wav_end, wav_start, wav_end, line_margin, pysme_out):
     sub_sme = deepcopy(sme)
@@ -305,6 +315,6 @@ def synthesize_spectrum_pqdm(sme, line_list, line_wav_start, line_wav_end, wav_s
 
     wav_indices = (sub_sme.wave >= wav_start) & (sub_sme.wave < wav_end)
     wav, flux = sub_sme.wave[0][wav_indices], sub_sme.synth[0][wav_indices]
-    del sub_sme
+    # del sub_sme
 
-    return wav, flux
+    return wav, flux, sub_sme

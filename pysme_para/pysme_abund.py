@@ -13,22 +13,37 @@ from contextlib import redirect_stdout
 from tqdm import tqdm
 from copy import copy
 
-def find_line_groups(wave, ele_fit, ion_fit, line_list, v_broad, margin_ratio=2):
+def has_overlap(range1, range2):
+    """检查两个波长范围是否重叠"""
+    return not (range1[1] < range2[0] or range1[0] > range2[1])
+
+def find_line_groups(wave, ele_fit, ion_fit, line_list, v_broad, margin_ratio=2, loggf_cut=None, line_mask_remove=None):
 
     # Get the line range for fitting
     fit_line_group = {}
+    if loggf_cut is not None:
+        use_list = line_list[line_list['gflog'] > loggf_cut]
+    else:
+        use_list = line_list
 
     for ele in ele_fit:
         fit_line_group[ele] = {}
         for ion in ion_fit: 
             fit_line_group_single = []
-            for i in line_list[line_list['species'] == f'{ele} {ion}'].index:
-                line_wav = line_list._lines.loc[i, 'wlcent']
-                line_cdepth = line_list._lines.loc[i, 'central_depth']
+            for i in use_list[use_list['species'] == f'{ele} {ion}'].index:
+                line_wav = use_list._lines.loc[i, 'wlcent']
+                line_cdepth = use_list._lines.loc[i, 'central_depth']
                 fit_line_group_single.append([line_wav, line_cdepth, line_wav * (1-margin_ratio*v_broad / 3e5), line_wav * (1+margin_ratio*v_broad / 3e5)])
             
             # Remove the line group outside the observed spectra
             fit_line_group_single = [ele for ele in fit_line_group_single if ele[2] >= np.min(wave) and ele[3] <= np.max(wave) and len(wave[(wave>=ele[2]) & (wave<=ele[3])]) > 1]
+
+            # 如果提供了line_mask_remove，过滤掉与mask重叠的谱线
+            if line_mask_remove is not None:
+                fit_line_group_single = [ele for ele in fit_line_group_single 
+                                       if not any(has_overlap([ele[2], ele[3]], mask) 
+                                                for mask in line_mask_remove)]
+
             # Merge the line_group if they are connected
             fit_line_group_single.sort(key=lambda x: x[0])
             merged_ranges = []
@@ -54,7 +69,25 @@ def find_line_groups(wave, ele_fit, ion_fit, line_list, v_broad, margin_ratio=2)
             fit_line_group[ele][ion] = [{'wlcent':ele[0], 'central_depth':ele[1], 'wav_s':ele[2], 'wav_e':ele[3]} for ele in merged_ranges]
     return fit_line_group
 
-def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit, ion_fit, fit_line_group, nlte_ele=[]):
+def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit, ion_fit, fit_line_group, nlte_ele=[], include_moleculer=False, varied_para=None):
+    '''
+    varied_para : default None. if specified, will only change the specified parameter.
+    '''
+
+    moleculer_line_dict = {
+        'C': ['CN 1', 'CH 1', 'C2 1', 'CO 1'],
+        'N': ['CN 1', 'NH 1', 'N2 1'],
+        'O': ['OH 1', 'CO 1']
+    }
+
+    param_variations = {
+        'teff': 100,
+        'logg': 0.2,
+        'monh': 0.1,
+        'vmic': 0.5,
+        'vmac': 1.0,
+        'vsini': 1.0
+    }
 
     # Generate the synthetic spectra using current parameters
     sme = SME_Structure()
@@ -80,26 +113,79 @@ def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, 
         flux_syn_minus, flux_syn_plus = np.ones_like(wave), np.ones_like(wave)
 
         sme.abund = abund
-        sme.abund[ele] += 0.1
-        sme.wave[0] = wave[wave_indices]
+        if varied_para is None:
+            sme.abund[ele] += 0.1
+        else:
+            # 根据varied_para修改对应参数
+            if varied_para == 'teff':
+                sme.teff += param_variations[varied_para]
+            elif varied_para == 'logg':
+                sme.logg += param_variations[varied_para]
+            elif varied_para == 'monh':
+                sme.monh += param_variations[varied_para]
+            elif varied_para == 'vmic':
+                sme.vmic += param_variations[varied_para]
+            elif varied_para == 'vmac':
+                sme.vmac += param_variations[varied_para]
+            elif varied_para == 'vsini':
+                sme.vsini += param_variations[varied_para]
+        sme.wave[0] = wave
 
         if len(sme.wave[0]) > 2:
             spec_syn_plus = pysme_synth.batch_synth(sme, line_list, parallel=True, n_jobs=10)
-            flux_syn_plus[wave_indices] = spec_syn_plus[1]
+            flux_syn_plus = spec_syn_plus[1]
         sme.abund = abund
-        sme.abund[ele] -= 0.2
+        if varied_para is None:
+            sme.abund[ele] -= 0.2
+        else:
+            # 根据varied_para修改对应参数
+            if varied_para == 'teff':
+                sme.teff -= 2*param_variations[varied_para]
+            elif varied_para == 'logg':
+                sme.logg -= 2*param_variations[varied_para]
+            elif varied_para == 'monh':
+                sme.monh -= 2*param_variations[varied_para]
+            elif varied_para == 'vmic':
+                sme.vmic -= 2*param_variations[varied_para]
+            elif varied_para == 'vmac':
+                sme.vmac -= 2*param_variations[varied_para]
+            elif varied_para == 'vsini':
+                sme.vsini -= 2*param_variations[varied_para]
         if len(sme.wave[0]) > 2:
             spec_syn_minus = pysme_synth.batch_synth(sme, line_list, parallel=True, n_jobs=10)
-            flux_syn_minus[wave_indices] = spec_syn_minus[1]
-        sme.abund[ele] += 0.1
+            flux_syn_minus = spec_syn_minus[1]
+        
+        # Back to the input value
+        if varied_para is None:
+            sme.abund[ele] += 0.1
+        else:
+            # 根据varied_para修改对应参数
+            if varied_para == 'teff':
+                sme.teff += param_variations[varied_para]
+            elif varied_para == 'logg':
+                sme.logg += param_variations[varied_para]
+            elif varied_para == 'monh':
+                sme.monh += param_variations[varied_para]
+            elif varied_para == 'vmic':
+                sme.vmic += param_variations[varied_para]
+            elif varied_para == 'vmac':
+                sme.vmac += param_variations[varied_para]
+            elif varied_para == 'vsini':
+                sme.vsini += param_variations[varied_para]
 
         flux_syn_ion = {}
         for ion in ion_fit:
-            print(f'Running for {ele} {ion}.')
+            indices = line_list['species'] == f'{ele} {ion}'
             flux_syn_ion[ion] = np.ones_like(wave)
+            if not include_moleculer or ele not in moleculer_line_dict.keys():
+                print(f'Running for {ele} {ion}. Not including molecular lines.')
+            else:
+                print(f'Running for {ele} {ion}. Including molecular lines of {moleculer_line_dict[ele]}.')
+                for mole_species in moleculer_line_dict[ele]:
+                    indices |= line_list['species'] == f'{mole_species}'
             try:
-                spec_syn_ion = pysme_synth.batch_synth(sme, line_list[line_list['species'] == f'{ele} {ion}'], parallel=True, n_jobs=10)
-                flux_syn_ion[ion][wave_indices] = spec_syn_ion[1]
+                spec_syn_ion = pysme_synth.batch_synth(sme, line_list[indices], parallel=True, n_jobs=10)
+                flux_syn_ion[ion] = spec_syn_ion[1]
             except:
                 pass
 
@@ -215,14 +301,9 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     # Define masks
     mask = np.zeros_like(sme_fit.wave[0], dtype=int)
     indices_con = (np.abs(sme_fit.synth[0] - 1) < synth_cont_level)
-    print('test')
-    print(sme_fit.wave[0])
-    print(sme_fit.linelist)
-    print(line_wav, sme_fit.synth[0], indices_con, telluric_spec)
     if telluric_spec is not None:
         indices_con &= telluric_spec > 1-0.1
-    return_mask = util.sigma_clip(
-    (flux[indices_con] / sme_fit.synth[0][indices_con]), sigma=2.0, return_mask=True)
+    return_mask = util.sigma_clip((flux[indices_con] / sme_fit.synth[0][indices_con]), sigma=2.0, return_mask=True)
     true_indices = np.where(indices_con)[0]
     indices_con[true_indices] = return_mask
 
@@ -282,8 +363,9 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         sigma_EW = np.nan
         fit_flag = 'error'
 
-    if is_within_ranges(line_wav, line_mask_remove):
-        fit_flag = 'removed'
+    if line_mask_remove is not None:
+        if is_within_ranges(line_wav, line_mask_remove):
+            fit_flag = 'removed'
 
     if telluric_spec is not None and max_telluric_depth > max_telluric_depth_thres:
         fit_flag = 'telluric_blended'
@@ -294,10 +376,11 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         indices = (spec_syn['total']['wave'] >= fit_range[0]-2) & (spec_syn['total']['wave'] <= fit_range[1]+2)
         plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele]['minus'][indices], spec_syn[ele]['plus'][indices], label=f"Synthetic spectra with [{ele}/Fe]$\pm$0.1", alpha=0.5)
         for ele_blend_single in ele_blend:
-            plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele_blend_single]['minus'][indices], spec_syn[ele_blend_single]['plus'][indices], label=f"Synthetic spectra with [{ele_blend_single}/Fe]$\pm$0.1", alpha=0.5)
+            plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele_blend_single]['minus'][indices], spec_syn[ele_blend_single]['plus'][indices], label=f"Synthetic spectra with [{ele_blend_single}/Fe]$\pm$0.1", alpha=0.3)
         plt.plot(spec_syn['total']['wave'][indices], spec_syn[ele]['ele_only'][ion][indices], c='C0', label=f"Synthetic spectra with {ele} {ion} line only")
-        plt.axvline(fit_range[0], color='C1', alpha=0.8, ls='-.')
-        plt.axvline(fit_range[1], color='C1', alpha=0.8, ls='-.')
+        # plt.axvline(fit_range[0], color='C1', alpha=0.8, ls='-.')
+        # plt.axvline(fit_range[1], color='C1', alpha=0.8, ls='-.')
+        plt.axvspan(*fit_range, color='C1', alpha=0.1)
         if type(line_wav) == list:
             for line_wav_single in line_wav:
                 plt.axvline(line_wav_single, c='C1', ls='--', label='', alpha=0.7)
@@ -306,6 +389,7 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         plt.legend()
 
         plt.title(f'{ele} {ion} ({line_wav} $\mathrm{{\AA}}$)')
+        plt.ylabel('Normalized flux')
 
         ax1 = plt.subplot(212)
         plt.errorbar(sme_fit.wave[0], sme_fit.spec[0], yerr=sme_fit.uncs[0], fmt='.', label='Observed spectrum')
@@ -323,7 +407,7 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
             plt.plot(sme_fit.wave[0], plus_fit_synth, label='', c='C1', ls='--')
             plt.plot(sme_fit.wave[0], minus_fit_synth, label='', c='C1', ls='--')
         
-        plt.axvspan(*fit_range, color='C1', alpha=0.2)
+        plt.axvspan(*fit_range, color='C1', alpha=0.1)
 
         bl_count = 2
         for species in blending_line_plot:
@@ -341,11 +425,10 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
             plt.title(f"Fitted A({ele})={sme_fit.fitresults['values'][0]:.3f}$\pm${sme_fit.fitresults['fit_uncertainties'][0]:.3f}, $\mathrm{{EW_{{synth, all}}}}$={EW_all:.2f}$\pm${sigma_EW:.2f} m$\mathrm{{\AA}}$, {fit_flag}")
         else:
             plt.title(f"Fitted A({ele})={sme_fit.fitresults['values'][0]:.3f}$\pm${sme_fit.fitresults['fit_uncertainties'][0]:.3f}, bad fitting")
-        # leg = plt.legend(loc=4)
-        # leg.set_zorder(10)
+        plt.ylabel('Normalized flux')
 
         ax2 = plt.twinx()
-        plt.plot(sme_fit.wave[0], sme_fit.mask[0], ls='--', c='gray', zorder=0)
+        plt.plot(sme_fit.wave[0], sme_fit.mask[0], ls='--', c='gray', zorder=-10, alpha=0.3)
         plt.ylabel('mask (dashed)')
         plt.gca().set_yticks([0, 1, 2])
         plt.gca().set_yticklabels(['bad', 'line', 'cont'])
@@ -354,7 +437,7 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         leg = ax2.legend(handles1, labels1, loc=4)  # 重新绘制 legend
         # leg.set_zorder(10)
 
-        plt.xlabel('Wavelength ($\mathrm{\AA}$)')
+        ax1.set_xlabel('Wavelength ($\mathrm{\AA}$)')
 
         plt.tight_layout()
         if save_path is not None:
@@ -367,7 +450,7 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
 
 def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_value=None):
 
-    plt.figure(figsize=(13, 4), dpi=150)
+    plt.figure(figsize=(10, 3), dpi=150)
     color_i = 0
     for ion in ion_fit:
         indices = (fit_line_group_ele['fit_result']['ioni_state'] == ion) & (fit_line_group_ele['fit_result']['flag'] == 'normal')
@@ -403,7 +486,10 @@ def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_
     plt.close()
 
 def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, line_list, ele_fit, 
-                ele_blend=[], ion_fit=[1, 2], nlte_ele=[], result_folder=None, line_mask_remove=None, abund=None, plot=False, standard_values=None, abund_record=None, save=False, overwrite=False, central_depth_thres=0.01, cal_central_depth=True, sensitivity_dominance_thres=0.3, line_dominance_thres=0.3, max_line_num=10, normalization=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=None, line_select_save=False, fit_line_group=None, sensitive_synth=None, blending_line_plot=[], cscale_flag='constant'):
+                ele_blend=[], ion_fit=[1, 2], nlte_ele=[], result_folder=None, line_mask_remove=None, abund=None, plot=False, standard_values=None, abund_record=None, 
+                save=False, overwrite=False, central_depth_thres=0.01, cal_central_depth=True, sensitivity_dominance_thres=0.3, line_dominance_thres=0.3, max_line_num=10, 
+                normalization=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=None, line_select_save=False, fit_line_group=None, sensitive_synth=None, 
+                blending_line_plot=[], cscale_flag='constant', include_moleculer=False):
     '''
     The main function for determining abundances using pysme.
     Input: observed wavelength, normalized flux, teff, logg, [M/H], vmic, vmac, vsini, line_list, pysme initial abundance list, line mask of wavelength to be removed.
@@ -462,17 +548,8 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
         print('Using the provided line selection and sensitive spectra.')
         pass
     else:
-        # if line_mask_remove is not None:
-        #     if type(line_mask_remove[0]) != list:
-        #         line_mask_remove = [line_mask_remove]
-        #     indices = wave > 0
-        #     for mask in line_mask_remove:
-        #         indices &= (wave < mask[0]) | (wave > mask[1])
-        #     fit_line_group = find_line_groups(wave[indices], ele_fit+ele_blend, ion_fit, line_list, v_broad)
-        # else:
         fit_line_group = find_line_groups(wave, ele_fit+ele_blend, ion_fit, line_list, v_broad)
-        
-        sensitive_synth = get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit+ele_blend, ion_fit, fit_line_group, nlte_ele=nlte_ele)
+        sensitive_synth = get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit+ele_blend, ion_fit, fit_line_group, nlte_ele=nlte_ele, include_moleculer=include_moleculer)
         fit_line_group = select_lines(fit_line_group, sensitive_synth, ele_fit+ele_blend, ion_fit, sensitivity_dominance_thres=sensitivity_dominance_thres, line_dominance_thres=line_dominance_thres, max_line_num=max_line_num, output_all=False)
         if line_select_save:
             pickle.dump(fit_line_group, open(f'{result_folder}/line_selection.pkl', 'wb'))
@@ -564,7 +641,7 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
 
     if plot:
         # Plot the final abundance and comparison
-        plt.figure(figsize=(14, 3))
+        plt.figure(figsize=(10, 3))
         plot_x = []
         label_func1 = lambda x: 'standard abunds' if x == 0 else ''
         label_func2 = lambda x: 'pysme abunds' if x == 0 else ''
