@@ -285,7 +285,7 @@ def measure_para(wave, flux, flux_err, teff, logg, monh, vmic, vmac, vsini, R, l
     else:
         use_list = line_list[line_list['central_depth'] > 0.1]
 
-    # Select the Fe 1 and Fe 2 lines according to the current stellar parameters
+    # Select the Fe 1 and/or Fe 2 lines according to the current stellar parameters
     fit_line_group = pysme_abund.find_line_groups(wave, ele_list, ion_list, use_list, v_broad, loggf_cut=-2, line_mask_remove=line_mask_remove)
     spec_syn = pysme_abund.get_sensitive_synth(wave, R, teff, logg, monh, vmic, vmac, vsini, use_list, abund, ele_list, ion_list, fit_line_group)
     selected_lines = pysme_abund.select_lines(fit_line_group, spec_syn, ele_list, ion_list, sensitivity_dominance_thres=0.6, line_dominance_thres=0.5, max_line_num=max_line_num)

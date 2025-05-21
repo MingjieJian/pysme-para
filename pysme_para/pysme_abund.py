@@ -69,7 +69,7 @@ def find_line_groups(wave, ele_fit, ion_fit, line_list, v_broad, margin_ratio=2,
             fit_line_group[ele][ion] = [{'wlcent':ele[0], 'central_depth':ele[1], 'wav_s':ele[2], 'wav_e':ele[3]} for ele in merged_ranges]
     return fit_line_group
 
-def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit, ion_fit, fit_line_group, nlte_ele=[], include_moleculer=False, varied_para=None):
+def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit, ion_fit, fit_line_group, nlte_ele=[], include_moleculer=False, varied_para=None, cdepth_thres=0):
     '''
     varied_para : default None. if specified, will only change the specified parameter.
     '''
@@ -98,7 +98,9 @@ def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, 
     sme.wave = wave
     for nlte_ele_single in nlte_ele:
         sme.nlte.set_nlte(nlte_ele_single)
-    spec_syn_all = pysme_synth.batch_synth(sme, line_list, parallel=True, n_jobs=10)
+    # if cdepth_thres > 0:
+    cdepth_indices = line_list['central_depth'] > cdepth_thres
+    spec_syn_all = pysme_synth.batch_synth(sme, line_list[cdepth_indices], parallel=True, n_jobs=10)
 
     # Calculate the sensitive spectra for the fitting elements.
     spec_syn = {}
@@ -132,7 +134,7 @@ def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, 
         sme.wave[0] = wave
 
         if len(sme.wave[0]) > 2:
-            spec_syn_plus = pysme_synth.batch_synth(sme, line_list, parallel=True, n_jobs=10)
+            spec_syn_plus = pysme_synth.batch_synth(sme, line_list[cdepth_indices], parallel=True, n_jobs=10)
             flux_syn_plus = spec_syn_plus[1]
         sme.abund = abund
         if varied_para is None:
@@ -152,7 +154,7 @@ def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, 
             elif varied_para == 'vsini':
                 sme.vsini -= 2*param_variations[varied_para]
         if len(sme.wave[0]) > 2:
-            spec_syn_minus = pysme_synth.batch_synth(sme, line_list, parallel=True, n_jobs=10)
+            spec_syn_minus = pysme_synth.batch_synth(sme, line_list[cdepth_indices], parallel=True, n_jobs=10)
             flux_syn_minus = spec_syn_minus[1]
         
         # Back to the input value
@@ -184,19 +186,19 @@ def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, 
                 for mole_species in moleculer_line_dict[ele]:
                     indices |= line_list['species'] == f'{mole_species}'
             try:
-                spec_syn_ion = pysme_synth.batch_synth(sme, line_list[indices], parallel=True, n_jobs=10)
+                spec_syn_ion = pysme_synth.batch_synth(sme, line_list[indices & cdepth_indices], parallel=True, n_jobs=10)
                 flux_syn_ion[ion] = spec_syn_ion[1]
             except:
                 pass
 
         spec_syn[ele] = {'minus':flux_syn_minus,
                             'plus':flux_syn_plus,
-                            'partial_derivative':np.abs(flux_syn_plus-flux_syn_minus)/2, 
+                            'partial_derivative':(flux_syn_plus-flux_syn_minus)/2, 
                             'ele_only':flux_syn_ion}
         if i == 0:
-            total_partial_derivative = np.abs(flux_syn_plus-flux_syn_minus)/2
+            total_partial_derivative = (flux_syn_plus-flux_syn_minus)/2
         else:
-            total_partial_derivative += np.abs(flux_syn_plus-flux_syn_minus)/2
+            total_partial_derivative += (flux_syn_plus-flux_syn_minus)/2
         
         i += 1
 
@@ -208,7 +210,7 @@ def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, 
     
     return spec_syn
 
-def select_lines(fit_line_group, spec_syn, ele_fit, ion_fit, sensitivity_dominance_thres=0.5, line_dominance_thres=0.5, max_line_num=10, output_all=False):
+def select_lines(fit_line_group, spec_syn, ele_fit, ion_fit, sensitivity_dominance_thres=0.5, line_dominance_thres=0.5, max_line_num=None, output_all=False):
 
     '''
     Select lines
@@ -241,7 +243,9 @@ def select_lines(fit_line_group, spec_syn, ele_fit, ion_fit, sensitivity_dominan
     for ele in ele_fit:
         for ion in ion_fit:
             indices = (fit_line_group[ele][ion]['sensitivity_dominance'] >= sensitivity_dominance_thres) & (fit_line_group[ele][ion]['line_dominance'] >= line_dominance_thres) & (fit_line_group[ele][ion]['line_dominance'] < 1) & (fit_line_group[ele][ion]['line_max_depth'] > 0.003*2)
-            fit_line_group[ele][ion] = fit_line_group[ele][ion][indices].sort_values('max_sensitivity', ascending=False)[:max_line_num].reset_index(drop=True)
+            fit_line_group[ele][ion] = fit_line_group[ele][ion][indices].sort_values('max_sensitivity', ascending=False).reset_index(drop=True)
+            if max_line_num is not None:
+                fit_line_group[ele][ion] = fit_line_group[ele][ion][:max_line_num]
 
     return fit_line_group
 
@@ -448,9 +452,9 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     del sme_fit
     return (fitresults, EW_all, sigma_EW, fit_flag)
 
-def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_value=None):
+def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_value=None, standard_label=None):
 
-    plt.figure(figsize=(10, 3), dpi=150)
+    plt.figure(figsize=(10*1.2, 3*1.2), dpi=150)
     color_i = 0
     for ion in ion_fit:
         indices = (fit_line_group_ele['fit_result']['ioni_state'] == ion) & (fit_line_group_ele['fit_result']['flag'] == 'normal')
@@ -471,11 +475,14 @@ def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_
     plt.ylim(plt.ylim())
     
     if standard_value is not None:
-        plt.axhline(standard_value, c='C3', label=f'Standard value: {standard_value:.2f}', ls='--')
+        if standard_label is not None:
+            plt.axhline(standard_value, c='C3', label=f'{standard_label}: {standard_value:.2f}', ls='--')
+        else:
+            plt.axhline(standard_value, c='C3', label=f'Standard value: {standard_value:.2f}', ls='--')
     plt.axhline(fit_line_group_ele['average_abundance'], label='Fitted value', ls='--')
     plt.axhspan(fit_line_group_ele['average_abundance']-fit_line_group_ele['average_abundance_err'], fit_line_group_ele['average_abundance']+fit_line_group_ele['average_abundance_err'], alpha=0.2, label='Fitted std')
     
-    plt.xticks(fit_line_group_ele['fit_result'].index, ['{:.3f}-{:.3f}$\mathrm{{\AA}}$'.format(fit_line_group_ele['fit_result'].loc[i, 'wav_s'], fit_line_group_ele['fit_result'].loc[i, 'wav_e']) for i in fit_line_group_ele['fit_result'].index], rotation=-90);
+    plt.xticks(fit_line_group_ele['fit_result'].index, ['{:.3f}-\n{:.3f}$\mathrm{{\AA}}$'.format(fit_line_group_ele['fit_result'].loc[i, 'wav_s'], fit_line_group_ele['fit_result'].loc[i, 'wav_e']) for i in fit_line_group_ele['fit_result'].index], rotation=-90);
     plt.legend(fontsize=7)
     plt.ylabel(f'A({ele})')
     plt.title(f"A({ele})={fit_line_group_ele['average_abundance']:.2f}$\pm${fit_line_group_ele['average_abundance_err']:.2f}")
@@ -486,7 +493,7 @@ def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_
     plt.close()
 
 def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, line_list, ele_fit, 
-                ele_blend=[], ion_fit=[1, 2], nlte_ele=[], result_folder=None, line_mask_remove=None, abund=None, plot=False, standard_values=None, abund_record=None, 
+                ele_blend=[], ion_fit=[1, 2], nlte_ele=[], result_folder=None, line_mask_remove=None, abund=None, plot=False, standard_values=None, standard_label=None, abund_record=None, 
                 save=False, overwrite=False, central_depth_thres=0.01, cal_central_depth=True, sensitivity_dominance_thres=0.3, line_dominance_thres=0.3, max_line_num=10, 
                 normalization=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=None, line_select_save=False, fit_line_group=None, sensitive_synth=None, 
                 blending_line_plot=[], cscale_flag='constant', include_moleculer=False):
@@ -630,9 +637,9 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
 
             if plot:
                 if standard_values is not None:
-                    plot_average_abun(ele, fit_line_group[ele], ion_fit, result_folder, standard_value=standard_values[0][ele_fit_count])
+                    plot_average_abun(ele, fit_line_group[ele], ion_fit, result_folder, standard_value=standard_values[0][ele_fit_count], standard_label=standard_label)
                 else:
-                    plot_average_abun(ele, fit_line_group[ele], ion_fit, result_folder)
+                    plot_average_abun(ele, fit_line_group[ele], ion_fit, result_folder, standard_label=standard_label)
             ele_fit_count += 1
 
             time_chi2_e = time.time()

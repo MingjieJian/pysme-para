@@ -1,5 +1,6 @@
 import numpy as np
 import spectres, scipy
+import pandas as pd
 
 def log_wav_raster(wave):
     a = wave[1] / wave[0]
@@ -185,6 +186,121 @@ def detect_peak_regions(data, peak_thresh, valley_thresh):
 
     return mask
 
+def generate_consistency_mask(wave, flux_obs, flux_syn, line_mask, sigma_thresh=2, valley_thresh=0.02, chunk=True, chunk_width=200, smooth=True, window_width=200, smooth_thresh=0.05):
+    """
+    Generate a boolean mask to identify inconsistent regions between observed and synthetic spectra.
+
+    This function first computes the difference between observed and synthetic fluxes, and applies the given line_mask
+    to select the spectral region of interest. For each chunk of the masked wavelength array (with chunk size in Angstroms),
+    it identifies pixels where the absolute difference exceeds sigma_thresh times the standard deviation within the chunk,
+    and extends the mask to the left and right until the difference drops below valley_thresh or a wavelength gap is detected
+    (i.e., np.abs(wave[j] - wave[j-1]) > 3 * del_lambda, where del_lambda is the median wavelength step).
+
+    Optionally, a rolling median smoothing can be applied to the full difference array, and regions where the smoothed
+    difference exceeds smooth_thresh are also masked.
+
+    Parameters
+    ----------
+    wave : np.ndarray
+        Wavelength array (in Angstroms).
+    flux_obs : np.ndarray
+        Observed flux array.
+    flux_syn : np.ndarray
+        Synthetic flux array.
+    line_mask : np.ndarray of bool
+        Boolean mask indicating the spectral region to process.
+    sigma_thresh : float, optional
+        Threshold in units of standard deviation to identify significant deviations (default: 2).
+    valley_thresh : float, optional
+        Threshold for extending the mask from a peak (default: 0.02).
+    chunk : bool, optional
+        Whether to process in wavelength chunks (default: True). If False, process the entire region as one chunk.
+    chunk_width : float, optional
+        Width of each chunk in Angstroms (default: 200).
+    smooth : bool, optional
+        Whether to apply rolling median smoothing to the difference array and mask regions with large smoothed residuals (default: True).
+    window_width : int, optional
+        Window size (in pixels) for rolling median smoothing (default: 200).
+    smooth_thresh : float, optional
+        Threshold for the absolute value of the smoothed difference to be masked (default: 0.05).
+
+    Returns
+    -------
+    mask : np.ndarray of bool
+        Boolean mask of the same length as the input arrays, where True indicates inconsistent regions.
+    smooth_arr : np.ndarray, optional
+        The rolling median smoothed difference array (only returned if smooth=True).
+    """
+    diff = flux_obs - flux_syn
+    wave_line = wave[line_mask]
+    diff_line = diff[line_mask]
+    mask_line = np.zeros_like(diff_line, dtype=bool)
+    del_lambda = np.nanmedian(np.diff(wave_line))
+
+    if chunk:
+        wave_min = wave_line[0]
+        wave_max = wave_line[-1]
+        n_chunk = int(np.ceil((wave_max - wave_min) / chunk_width))
+        for i in range(n_chunk):
+            chunk_left = wave_min + i * chunk_width
+            chunk_right = chunk_left + chunk_width
+            indices = np.where((wave_line >= chunk_left) & (wave_line < chunk_right))[0]
+            if len(indices) == 0:
+                continue
+            diff_chunk = diff_line[indices]
+            wave_chunk = wave_line[indices]
+            std_diff = np.nanstd(diff_chunk)
+            big_peaks = np.where(np.abs(diff_chunk) > sigma_thresh * std_diff)[0]
+            for idx in big_peaks:
+                # Extend to the left
+                j = idx
+                while j > 0 and np.abs(diff_chunk[j]) >= valley_thresh:
+                    if np.abs(wave_chunk[j] - wave_chunk[j-1]) > 3 * del_lambda:
+                        break
+                    mask_line[indices[j]] = True
+                    j -= 1
+                mask_line[indices[j]] = True  # 包含起点
+                # Extend to the right
+                j = idx + 1
+                while j < len(diff_chunk) and np.abs(diff_chunk[j]) >= valley_thresh:
+                    if np.abs(wave_chunk[j] - wave_chunk[j-1]) > 3 * del_lambda:
+                        break
+                    mask_line[indices[j]] = True
+                    j += 1
+    else:
+        std_diff = np.std(diff_line)
+        big_peaks = np.where(np.abs(diff_line) > sigma_thresh * std_diff)[0]
+        for idx in big_peaks:
+            # Extend to the left
+            j = idx
+            while j > 0 and np.abs(diff_line[j]) >= valley_thresh:
+                if np.abs(wave_line[j] - wave_line[j-1]) > 3 * del_lambda:
+                    break
+                mask_line[j] = True
+                j -= 1
+            mask_line[j] = True  # 包含起点
+            # Extend to the right
+            j = idx + 1
+            while j < len(diff_line) and np.abs(diff_line[j]) >= valley_thresh:
+                if np.abs(wave_line[j] - wave_line[j-1]) > 3 * del_lambda:
+                    break
+                mask_line[j] = True
+                j += 1
+
+    mask = np.zeros_like(diff, dtype=bool)
+    mask[np.where(line_mask)[0]] = mask_line
+    
+    # 平滑处理
+    if smooth:
+        smooth_arr = pd.Series(diff).rolling(window=window_width, center=True).median().to_numpy()
+        smooth_mask = np.abs(smooth_arr) > smooth_thresh
+        smooth_mask[np.isnan(smooth_arr)] = False
+        mask |= smooth_mask
+    
+        return mask, smooth_arr
+    else:
+        return mask
+
 def get_false_regions_wavelengths(wavelengths, mask):
     """
     根据布尔 mask 提取所有 mask 为 False 的波长段范围。
@@ -214,3 +330,35 @@ def get_false_regions_wavelengths(wavelengths, mask):
         regions.append([wl_start, wl_end])
 
     return regions
+
+def chunk_array(arr, chunk_number):
+    """
+    Split a 1D numpy array into approximately `chunk_number` chunks.
+    If the last chunk is shorter than or equal to the average chunk length,
+    it is merged into the previous chunk.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input 1D array to split.
+    chunk_number : int
+        Desired number of chunks.
+
+    Returns
+    -------
+    list of np.ndarray
+        A list of arrays split from the input. Last one may be merged if too short.
+    """
+    arr = np.asarray(arr)
+    n = len(arr)
+    avg_chunk_size = int(np.ceil(n / chunk_number))
+
+    # Initial split
+    chunks = [arr[i:i + avg_chunk_size] for i in range(0, n, avg_chunk_size)]
+
+    # If last chunk is too short, merge it
+    if len(chunks) > 1 and len(chunks[-1]) <= avg_chunk_size:
+        chunks[-2] = np.concatenate([chunks[-2], chunks[-1]])
+        chunks.pop()
+
+    return chunks
