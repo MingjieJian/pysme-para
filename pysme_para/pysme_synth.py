@@ -261,7 +261,7 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
 
     N_chunk = len(sub_wave_range)
 
-    sub_sme_all = []
+    # sub_sme_all = []
     args = []
     for i in tqdm(range(N_chunk)):
         line_wav_start, line_wav_end = sub_wave_range[i]
@@ -284,7 +284,7 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
                 wav, flux = sub_sme.wave[0][wav_indices], sub_sme.synth[0][wav_indices]
             else:
                 wav, flux = np.concatenate([wav, sub_sme.wave[0][wav_indices]]), np.concatenate([flux, sub_sme.synth[0][wav_indices]])
-            sub_sme_all.append(sub_sme)
+            # sub_sme_all.append(sub_sme)
 
     if parallel:
         if parallel_mode == 'loky':
@@ -295,7 +295,7 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
         wav = np.concatenate(wav)
         flux = [item[1] for item in results]
         flux = np.concatenate(flux)
-        sub_sme_all = [item[2] for item in results]
+        # sub_sme_all = [item[2] for item in results]
     # Merge the spectra
     if np.all(wav != sme.wave[0]):  
         raise ValueError

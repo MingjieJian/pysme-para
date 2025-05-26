@@ -273,8 +273,8 @@ def is_within_ranges(line_wav, line_mask_remove):
 def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg, m_h, vmic, vmac, vsini, abund, use_list, 
               spec_syn, synth_margin=5,
               ele_blend=[],
-              save_path=None, plot=False, atmo=None, normalization=False, nlte=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=0.1,
-              synth_cont_level=0.025, cscale_flag='constant',
+              save_path=None, plot=False, atmo=None, nlte=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=0.1,
+              synth_cont_level=0.025, cscale_flag='constant', mu=None,
               blending_line_plot=[], line_mask_remove=None):
 
     '''
@@ -301,6 +301,8 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     sme_fit = synthesize_spectrum(sme_fit)
     sme_fit.spec = flux
     sme_fit.uncs = flux_uncs
+    if mu is not None:
+        sme_fit.mu = mu
 
     # Define masks
     mask = np.zeros_like(sme_fit.wave[0], dtype=int)
@@ -327,13 +329,6 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     if atmo is not None:
         sme_fit.atmo = atmo
         sme_fit.atmo.method = 'embedded'
-
-    # if normalization and not(np.all(np.isnan(sme_fit.spec[0][indices]))):
-    #     sme_fit.save('ttt.sme')
-    #     sme_fit = synthesize_spectrum(sme_fit)
-    #     con_level = np.nanmedian(sme_fit.spec[0] / sme_fit.synth[0])
-    #     sme_fit.spec = sme_fit.spec[0] / con_level
-    #     sme_fit.uncs = sme_fit.uncs[0] / con_level
 
     if np.all(np.isnan(sme_fit.spec[0][indices])):
         sme_fit.fitresults['values'] = [np.nan]
@@ -396,8 +391,8 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         plt.ylabel('Normalized flux')
 
         ax1 = plt.subplot(212)
-        plt.errorbar(sme_fit.wave[0], sme_fit.spec[0], yerr=sme_fit.uncs[0], fmt='.', label='Observed spectrum')
-        plt.plot(sme_fit.wave[0], best_fit_synth, label='Synthesized spectrum')
+        plt.errorbar(sme_fit.wave[0], sme_fit.spec[0], yerr=sme_fit.uncs[0], fmt='.', label='Observed spectrum', zorder=0)
+        plt.plot(sme_fit.wave[0], best_fit_synth, label='Synthesized spectrum', zorder=2)
         if type(line_wav) == list:
             for line_wav_single in line_wav:
                 plt.axvline(line_wav_single, c='C1', ls='--', label='', alpha=0.7)
@@ -495,8 +490,8 @@ def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_
 def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, line_list, ele_fit, 
                 ele_blend=[], ion_fit=[1, 2], nlte_ele=[], result_folder=None, line_mask_remove=None, abund=None, plot=False, standard_values=None, standard_label=None, abund_record=None, 
                 save=False, overwrite=False, central_depth_thres=0.01, cal_central_depth=True, sensitivity_dominance_thres=0.3, line_dominance_thres=0.3, max_line_num=10, 
-                normalization=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=None, line_select_save=False, fit_line_group=None, sensitive_synth=None, 
-                blending_line_plot=[], cscale_flag='constant', include_moleculer=False):
+                fit_rv=False, telluric_spec=None, max_telluric_depth_thres=None, line_select_save=False, fit_line_group=None, sensitive_synth=None, 
+                blending_line_plot=[], cscale_flag='constant', include_moleculer=False, mu=None):
     '''
     The main function for determining abundances using pysme.
     Input: observed wavelength, normalized flux, teff, logg, [M/H], vmic, vmac, vsini, line_list, pysme initial abundance list, line mask of wavelength to be removed.
@@ -596,10 +591,10 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
                     fitresults, EW, diff_EW, fit_flag = abund_fit(ele, ion, wave, flux, flux_err, line_wav, fit_range, R, teff, logg, m_h, vmic, vmac, vsini, abund, line_list, sensitive_synth,
                     nlte=nlte_flag,
                     ele_blend=ele_blend,
-                    save_path=f"{result_folder}/{ele}/{ele}_{ion}", atmo=None, plot=plot, normalization=normalization, fit_rv=fit_rv, telluric_spec=telluric_spec,
+                    save_path=f"{result_folder}/{ele}/{ele}_{ion}", atmo=None, plot=plot, fit_rv=fit_rv, telluric_spec=telluric_spec,
                     max_telluric_depth_thres=max_telluric_depth_thres,
                     blending_line_plot=blending_line_plot,line_mask_remove=line_mask_remove,
-                    cscale_flag=cscale_flag)
+                    cscale_flag=cscale_flag, mu=mu)
 
                     fit_result.append({f'A({ele})':fitresults.values[0], f'err_A({ele})':fitresults.fit_uncertainties[0], 'EW':EW, 'diff_EW':diff_EW, 'flag':fit_flag})
 
