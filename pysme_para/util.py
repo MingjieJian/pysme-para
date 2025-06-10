@@ -250,7 +250,7 @@ def generate_consistency_mask(wave, flux_obs, flux_syn, line_mask, sigma_thresh=
             diff_chunk = diff_line[indices]
             wave_chunk = wave_line[indices]
             std_diff = np.nanstd(diff_chunk)
-            big_peaks = np.where(np.abs(diff_chunk) > sigma_thresh * std_diff)[0]
+            big_peaks = np.where(np.abs(diff_chunk - np.mean(diff_chunk)) > sigma_thresh * std_diff)[0]
             for idx in big_peaks:
                 # Extend to the left
                 j = idx
@@ -269,7 +269,7 @@ def generate_consistency_mask(wave, flux_obs, flux_syn, line_mask, sigma_thresh=
                     j += 1
     else:
         std_diff = np.std(diff_line)
-        big_peaks = np.where(np.abs(diff_line) > sigma_thresh * std_diff)[0]
+        big_peaks = np.where(np.abs(diff_line - np.mean(diff_line)) > sigma_thresh * std_diff)[0]
         for idx in big_peaks:
             # Extend to the left
             j = idx
@@ -288,14 +288,14 @@ def generate_consistency_mask(wave, flux_obs, flux_syn, line_mask, sigma_thresh=
                 j += 1
 
     mask = np.zeros_like(diff, dtype=bool)
-    mask[np.where(line_mask)[0]] = mask_line
+    mask[np.where(line_mask)[0]] = ~mask_line
     
     # 平滑处理
     if smooth:
         smooth_arr = pd.Series(diff).rolling(window=window_width, center=True).median().to_numpy()
-        smooth_mask = np.abs(smooth_arr) > smooth_thresh
+        smooth_mask = np.abs(smooth_arr) <= smooth_thresh
         smooth_mask[np.isnan(smooth_arr)] = False
-        mask |= smooth_mask
+        mask &= smooth_mask
     
         return mask, smooth_arr
     else:
@@ -330,6 +330,100 @@ def get_false_regions_wavelengths(wavelengths, mask):
         regions.append([wl_start, wl_end])
 
     return regions
+
+# 修改后的函数：line_to_range 和 range_to_line
+def line_to_range(line_list, vmic, vmac, vsini, R, extend_ratio=2):
+    """
+    Convert a list of line center wavelengths to merged lambda ranges with broadening.
+    """
+    v_broad = np.sqrt(vmic**2 + vmac**2 + vsini**2 + (3e5 / R)**2)  # km/s
+    delta_lambda = [l * v_broad / 3e5 for l in line_list]
+    raw_ranges = [(l - extend_ratio*dl, l + extend_ratio*dl) for l, dl in zip(line_list, delta_lambda)]
+
+    # 合并重叠或相邻的区间
+    if not raw_ranges:
+        return []
+    raw_ranges.sort()
+    merged_ranges = [raw_ranges[0]]
+    for start, end in raw_ranges[1:]:
+        last_start, last_end = merged_ranges[-1]
+        if start <= last_end:  # overlap
+            merged_ranges[-1] = (last_start, max(last_end, end))  # merge
+        else:
+            merged_ranges.append((start, end))
+    return merged_ranges
+
+def range_to_line(lambda_ranges, line_candidates):
+    """
+    Select line candidates that fall within any of the provided lambda ranges.
+    """
+    selected = []
+    for l0 in line_candidates:
+        for l_start, l_end in lambda_ranges:
+            if l_start <= l0 <= l_end:
+                selected.append(l0)
+                break
+    return selected
+
+def range_to_pixel(lambda_ranges, lambda_pix):
+    mask = np.full(len(lambda_pix), False)
+    for start, end in lambda_ranges:
+        mask |= (lambda_pix >= start) & (lambda_pix <= end)
+    return mask
+
+# def pixel_to_range(lambda_pix, pixel_mask, lambda_pix, vbroad=0):
+#     ranges = []
+#     in_range = False
+#     for i, use in enumerate(pixel_mask):
+#         if use and not in_range:
+#             in_range = True
+#             start = lambda_pix[i]
+#         elif not use and in_range:
+#             end = lambda_pix[i - 1]
+#             ranges.append((start, end))
+#             in_range = False
+#     if in_range:
+#         ranges.append((start, lambda_pix[-1]))
+#     return ranges
+
+def pixel_to_range(lambda_pix, pixel_mask, vmic, vmac, vsini, R):
+    """
+    Convert pixel mask to lambda ranges, removing those narrower than 2 * delta_lambda.
+    Also returns the updated pixel mask with short ranges removed.
+    """
+    ranges = []
+    new_mask = pixel_mask.copy()
+    in_range = False
+
+    for i, use in enumerate(pixel_mask):
+        if use and not in_range:
+            in_range = True
+            start_idx = i
+            start = lambda_pix[i]
+        elif not use and in_range:
+            end_idx = i - 1
+            end = lambda_pix[end_idx]
+            center = (start + end) / 2
+            v_broad = np.sqrt(vmic**2 + vmac**2 + vsini**2 + (3e5 / R)**2)
+            delta_lambda = center * v_broad / 3e5
+            if (end - start) >= 2 * delta_lambda:
+                ranges.append((start, end))
+            else:
+                new_mask[start_idx:end_idx + 1] = False
+            in_range = False
+
+    if in_range:
+        end_idx = len(lambda_pix) - 1
+        end = lambda_pix[end_idx]
+        center = (start + end) / 2
+        v_broad = np.sqrt(vmic**2 + vmac**2 + vsini**2 + (3e5 / R)**2)
+        delta_lambda = center * v_broad / 3e5
+        if (end - start) >= 2 * delta_lambda:
+            ranges.append((start, end))
+        else:
+            new_mask[start_idx:end_idx + 1] = False
+
+    return ranges, new_mask
 
 def chunk_array(arr, chunk_number):
     """

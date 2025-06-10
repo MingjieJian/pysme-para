@@ -374,17 +374,19 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         plt.subplot(211)
         indices = (spec_syn['total']['wave'] >= fit_range[0]-2) & (spec_syn['total']['wave'] <= fit_range[1]+2)
         plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele]['minus'][indices], spec_syn[ele]['plus'][indices], label=f"Synthetic spectra with [{ele}/Fe]$\pm$0.1", alpha=0.5)
+        color_i = 2
         for ele_blend_single in ele_blend:
-            plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele_blend_single]['minus'][indices], spec_syn[ele_blend_single]['plus'][indices], label=f"Synthetic spectra with [{ele_blend_single}/Fe]$\pm$0.1", alpha=0.3)
+            plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele_blend_single]['minus'][indices], spec_syn[ele_blend_single]['plus'][indices], label=f"Synthetic spectra with [{ele_blend_single}/Fe]$\pm$0.1", alpha=0.3, color=f'C{color_i}')
+            color_i += 1
         plt.plot(spec_syn['total']['wave'][indices], spec_syn[ele]['ele_only'][ion][indices], c='C0', label=f"Synthetic spectra with {ele} {ion} line only")
         # plt.axvline(fit_range[0], color='C1', alpha=0.8, ls='-.')
         # plt.axvline(fit_range[1], color='C1', alpha=0.8, ls='-.')
         plt.axvspan(*fit_range, color='C1', alpha=0.1)
         if type(line_wav) == list:
             for line_wav_single in line_wav:
-                plt.axvline(line_wav_single, c='C1', ls='--', label='', alpha=0.7)
+                plt.axvline(line_wav_single, c='C1', ls=':', label='', alpha=0.7)
         else:
-            plt.axvline(line_wav, c='C1', ls='--', label='', alpha=0.7)
+            plt.axvline(line_wav, c='C1', ls=':', label='', alpha=0.7)
         plt.legend()
 
         plt.title(f'{ele} {ion} ({line_wav} $\mathrm{{\AA}}$)')
@@ -395,9 +397,9 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         plt.plot(sme_fit.wave[0], best_fit_synth, label='Synthesized spectrum', zorder=2)
         if type(line_wav) == list:
             for line_wav_single in line_wav:
-                plt.axvline(line_wav_single, c='C1', ls='--', label='', alpha=0.7)
+                plt.axvline(line_wav_single, c='C1', ls=':', label='', alpha=0.7)
         else:
-            plt.axvline(line_wav, c='C1', ls='--', label='', alpha=0.7)
+            plt.axvline(line_wav, c='C1', ls=':', label='', alpha=0.7)
         ylim = plt.ylim()
         plt.ylim(ylim)
         if telluric_spec is not None:
@@ -414,16 +416,16 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
             indices = (sme_fit.linelist['species'] == species) & (sme_fit.linelist['wlcent'] > wav[0]) & (sme_fit.linelist['wlcent'] < wav[-1])
             for line_wave in sme_fit.linelist[indices]['wlcent']:
                 if t_count == 0:
-                    plt.plot([line_wave, line_wave], [ylim[0]+(ylim[1]-ylim[0])*6/7, ylim[1]], ls='--', alpha=0.3, label=f'{species} line', c=f'C{bl_count}')
+                    plt.plot([line_wave, line_wave], [ylim[0]+(ylim[1]-ylim[0])*6/7, ylim[1]], ls=':', alpha=0.3, label=f'{species} line', c=f'C{bl_count}')
                 else:
-                    plt.plot([line_wave, line_wave], [ylim[0]+(ylim[1]-ylim[0])*6/7, ylim[1]], ls='--', alpha=0.3, c=f'C{bl_count}')
+                    plt.plot([line_wave, line_wave], [ylim[0]+(ylim[1]-ylim[0])*6/7, ylim[1]], ls=':', alpha=0.3, c=f'C{bl_count}')
                 t_count += 1
             bl_count += 1
 
         if sme_fit.fitresults['fit_uncertainties'][0] < 8:
-            plt.title(f"Fitted A({ele})={sme_fit.fitresults['values'][0]:.3f}$\pm${sme_fit.fitresults['fit_uncertainties'][0]:.3f}, $\mathrm{{EW_{{synth, all}}}}$={EW_all:.2f}$\pm${sigma_EW:.2f} m$\mathrm{{\AA}}$, {fit_flag}")
+            plt.title(f"Fitted A({ele})={sme_fit.fitresults['values'][0]:.2f}$\pm${sme_fit.fitresults['fit_uncertainties'][0]:.2f}, $\mathrm{{EW_{{synth, all}}}}$={EW_all:.2f}$\pm${sigma_EW:.2f} m$\mathrm{{\AA}}$, {fit_flag}")
         else:
-            plt.title(f"Fitted A({ele})={sme_fit.fitresults['values'][0]:.3f}$\pm${sme_fit.fitresults['fit_uncertainties'][0]:.3f}, bad fitting")
+            plt.title(f"Fitted A({ele})={sme_fit.fitresults['values'][0]:.2f}$\pm${sme_fit.fitresults['fit_uncertainties'][0]:.2f}, bad fitting")
         plt.ylabel('Normalized flux')
 
         ax2 = plt.twinx()
@@ -453,20 +455,21 @@ def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_
     color_i = 0
     for ion in ion_fit:
         indices = (fit_line_group_ele['fit_result']['ioni_state'] == ion) & (fit_line_group_ele['fit_result']['flag'] == 'normal')
-        plt.scatter(fit_line_group_ele['fit_result'].index[indices], fit_line_group_ele['fit_result'].loc[indices, f'A({ele})'], zorder=2, label=f'{ele} {ion} line', c=f'C{color_i}')
-        plt.errorbar(fit_line_group_ele['fit_result'].index[indices], fit_line_group_ele['fit_result'].loc[indices, f'A({ele})'], 
-                 yerr=fit_line_group_ele['fit_result'].loc[indices, f'err_A({ele})'], fmt='.', zorder=1, c=f'C{color_i}', alpha=1)
-        
-        indices = (fit_line_group_ele['fit_result']['ioni_state'] == ion) & (fit_line_group_ele['fit_result']['flag'] != 'normal') & (fit_line_group_ele['fit_result']['flag'] != 'upper_limit')
-        plt.scatter(fit_line_group_ele['fit_result'].index[indices], fit_line_group_ele['fit_result'].loc[indices, f'A({ele})'], zorder=3, label=f'', c='red', marker='x')
+        if len(fit_line_group_ele['fit_result'].index[indices]) > 0:
+            plt.scatter(fit_line_group_ele['fit_result'].index[indices], fit_line_group_ele['fit_result'].loc[indices, f'A({ele})'], zorder=2, label=f'{ele} {ion} line', c=f'C{color_i}')
+            plt.errorbar(fit_line_group_ele['fit_result'].index[indices], fit_line_group_ele['fit_result'].loc[indices, f'A({ele})'], 
+                    yerr=fit_line_group_ele['fit_result'].loc[indices, f'err_A({ele})'], fmt='.', zorder=1, c=f'C{color_i}', alpha=1)
+            
+            indices = (fit_line_group_ele['fit_result']['ioni_state'] == ion) & (fit_line_group_ele['fit_result']['flag'] != 'normal') & (fit_line_group_ele['fit_result']['flag'] != 'upper_limit')
+            plt.scatter(fit_line_group_ele['fit_result'].index[indices], fit_line_group_ele['fit_result'].loc[indices, f'A({ele})'], zorder=3, label=f'', c='red', marker='x')
 
-        indices = (fit_line_group_ele['fit_result']['ioni_state'] == ion) & (fit_line_group_ele['fit_result']['flag'] == 'upper_limit')
-        plt.errorbar(fit_line_group_ele['fit_result'].index[indices], fit_line_group_ele['fit_result'].loc[indices, f'A({ele})']+fit_line_group_ele['fit_result'].loc[indices, f'err_A({ele})'],
-                     yerr=fit_line_group_ele['fit_result'].loc[indices, f'err_A({ele})'],
-                     uplims=fit_line_group_ele['fit_result'].loc[indices, f'err_A({ele})'],
-                     marker='_', markersize=10, ls='none')
-                     
-        color_i += 1
+            indices = (fit_line_group_ele['fit_result']['ioni_state'] == ion) & (fit_line_group_ele['fit_result']['flag'] == 'upper_limit')
+            plt.errorbar(fit_line_group_ele['fit_result'].index[indices], fit_line_group_ele['fit_result'].loc[indices, f'A({ele})']+fit_line_group_ele['fit_result'].loc[indices, f'err_A({ele})'],
+                        yerr=fit_line_group_ele['fit_result'].loc[indices, f'err_A({ele})'],
+                        uplims=fit_line_group_ele['fit_result'].loc[indices, f'err_A({ele})'],
+                        marker='_', markersize=10, ls='none')
+                        
+            color_i += 1
     plt.ylim(plt.ylim())
     
     if standard_value is not None:
@@ -477,7 +480,7 @@ def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_
     plt.axhline(fit_line_group_ele['average_abundance'], label='Fitted value', ls='--')
     plt.axhspan(fit_line_group_ele['average_abundance']-fit_line_group_ele['average_abundance_err'], fit_line_group_ele['average_abundance']+fit_line_group_ele['average_abundance_err'], alpha=0.2, label='Fitted std')
     
-    plt.xticks(fit_line_group_ele['fit_result'].index, ['{:.3f}-\n{:.3f}$\mathrm{{\AA}}$'.format(fit_line_group_ele['fit_result'].loc[i, 'wav_s'], fit_line_group_ele['fit_result'].loc[i, 'wav_e']) for i in fit_line_group_ele['fit_result'].index], rotation=-90);
+    plt.xticks(fit_line_group_ele['fit_result'].index, ['{:.3f}-\n{:.3f}$\mathrm{{\AA}}$'.format(fit_line_group_ele['fit_result'].loc[i, 'wav_s'], fit_line_group_ele['fit_result'].loc[i, 'wav_e']) for i in fit_line_group_ele['fit_result'].index], rotation=90);
     plt.legend(fontsize=7)
     plt.ylabel(f'A({ele})')
     plt.title(f"A({ele})={fit_line_group_ele['average_abundance']:.2f}$\pm${fit_line_group_ele['average_abundance_err']:.2f}")
