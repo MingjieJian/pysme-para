@@ -325,19 +325,17 @@ def synthesize_spectrum_pqdm(args):
 
     sme, line_list, line_wav_start, line_wav_end, wav_start, wav_end, line_margin, pysme_out = args
 
-    sub_sme = deepcopy(sme)
-    sub_sme.linelist = line_list[~((line_list['line_range_e'] < line_wav_start-line_margin) | (line_list['line_range_s'] > line_wav_end+line_margin))]
+    sme.linelist = line_list[~((line_list['line_range_e'] < line_wav_start-line_margin) | (line_list['line_range_s'] > line_wav_end+line_margin))]
     # sub_sme.wave = sme.wave[(sme.wave >= wav_start) & (sme.wave < wav_end)]
     # Define the wavelength. Here we extend the wavelength array to include the vsini effect.
-    sub_sme.wave = sme.wave[(sme.wave >= wav_start - sub_sme.vsini/3e5*wav_start) & (sme.wave < wav_end + sub_sme.vsini/3e5*wav_start)]
+    sme.wave = sme.wave[(sme.wave >= wav_start - sme.vsini/3e5*wav_start) & (sme.wave < wav_end + sme.vsini/3e5*wav_start)]
     if pysme_out:
-        sub_sme = synthesize_spectrum(sub_sme)
+        sub_sme = synthesize_spectrum(sme)
     else:
         with redirect_stdout(open(f"/dev/null", 'w')):
-            sub_sme = synthesize_spectrum(sub_sme)
+            sub_sme = synthesize_spectrum(sme)
 
     wav_indices = (sub_sme.wave >= wav_start) & (sub_sme.wave < wav_end)
     wav, flux = sub_sme.wave[0][wav_indices], sub_sme.synth[0][wav_indices]
-    # del sub_sme
 
-    return wav, flux, sub_sme
+    return wav, flux
