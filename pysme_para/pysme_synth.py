@@ -281,9 +281,9 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
                     sub_sme = synthesize_spectrum(sub_sme)
             wav_indices = (sub_sme.wave >= wav_start) & (sub_sme.wave < wav_end)
             if i == 0:
-                wav, flux = sub_sme.wave[0][wav_indices], sub_sme.synth[0][wav_indices]
+                wav, flux, cont = sub_sme.wave[0][wav_indices], sub_sme.synth[0][wav_indices], sub_sme.cont[0][wav_indices]
             else:
-                wav, flux = np.concatenate([wav, sub_sme.wave[0][wav_indices]]), np.concatenate([flux, sub_sme.synth[0][wav_indices]])
+                wav, flux, cont = np.concatenate([wav, sub_sme.wave[0][wav_indices]]), np.concatenate([flux, sub_sme.synth[0][wav_indices]]), np.concatenate([flux, sub_sme.cont[0][wav_indices]])
             # sub_sme_all.append(sub_sme)
 
     if parallel:
@@ -295,12 +295,14 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
         wav = np.concatenate(wav)
         flux = [item[1] for item in results]
         flux = np.concatenate(flux)
+        cont = [item[2] for item in results]
+        cont = np.concatenate(cont)
         # sub_sme_all = [item[2] for item in results]
     # Merge the spectra
     if np.all(wav != sme.wave[0]):  
         raise ValueError
     
-    return wav, flux 
+    return wav, flux, cont
 
 def synthesize_spectrum_loky(sme, line_list, line_wav_start, line_wav_end, wav_start, wav_end, line_margin, pysme_out):
 
@@ -336,6 +338,6 @@ def synthesize_spectrum_pqdm(args):
             sub_sme = synthesize_spectrum(sme)
 
     wav_indices = (sub_sme.wave >= wav_start) & (sub_sme.wave < wav_end)
-    wav, flux = sub_sme.wave[0][wav_indices], sub_sme.synth[0][wav_indices]
+    wav, flux, cont = sub_sme.wave[0][wav_indices], sub_sme.synth[0][wav_indices], sub_sme.cont[0][wav_indices]
 
-    return wav, flux
+    return wav, flux, cont
