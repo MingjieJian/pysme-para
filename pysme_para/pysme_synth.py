@@ -263,13 +263,14 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
 
     # sub_sme_all = []
     args = []
+    if not parallel:
+        sub_sme = deepcopy(sme)
     for i in tqdm(range(N_chunk)):
         line_wav_start, line_wav_end = sub_wave_range[i]
         wav_start, wav_end = sub_wave_range[i][0], sub_wave_range[i][1]
         # print(wav_start, wav_end)
         args.append([sme, line_list, line_wav_start, line_wav_end, wav_start, wav_end, line_margin, pysme_out])
         if not parallel:
-            sub_sme = deepcopy(sme)
             sub_sme.linelist = line_list[~((line_list['line_range_e'] < line_wav_start-line_margin) | (line_list['line_range_s'] > line_wav_end+line_margin))]
             # Define the wavelength. Here we extend the wavelength array to include the vsini effect.
             sub_sme.wave = sme.wave[(sme.wave >= wav_start - sub_sme.vsini/3e5*wav_start) & (sme.wave < wav_end + sub_sme.vsini/3e5*wav_start)]
