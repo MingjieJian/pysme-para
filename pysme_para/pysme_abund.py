@@ -272,10 +272,10 @@ def is_within_ranges(line_wav, line_mask_remove):
 
 def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg, m_h, vmic, vmac, vsini, abund, use_list, 
               spec_syn, synth_margin=5,
-              ele_blend=[],
+              ele_blend=[], ele_blend_fit=[],
               save_path=None, plot=False, atmo=None, nlte=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=0.1,
               synth_cont_level=0.025, cscale_flag='constant', mu=None,
-              blending_line_plot=[], line_mask_remove=None):
+              blending_line_plot=[], line_mask_remove=None, star_name=None):
 
     '''
     Fit the abundance of a single line.
@@ -303,6 +303,13 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     sme_fit.uncs = flux_uncs
     if mu is not None:
         sme_fit.mu = mu
+
+    # Add blending abundance to fit, if specified.
+    #  Here we put the whole spectra into fitting
+    print(f'ele_blend_fit is {ele_blend_fit}')
+    for ele_blend_single in ele_blend_fit:
+        sme_fit = solve(sme_fit, [f'abund {ele_blend_single}'], bounds=sme_fit.abund[ele_blend_single]+np.array([-2, 2]))
+        print(f'Fitting blending element: {ele_blend_single}, fitting abundace is: {sme_fit.fitresults["values"]}.')
 
     # Define masks
     mask = np.zeros_like(sme_fit.wave[0], dtype=int)
@@ -343,7 +350,7 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     
     # Calculate the EW
     indices = (sme_fit.wave[0] >= fit_range[0]) & (sme_fit.wave[0] <= fit_range[1])
-    EW_all = np.trapz(1-sme_fit.synth[0][indices], sme_fit.wave[0][indices]) * 1000
+    EW_all = np.trapz(1-sme_fit.synth[0][indices]/sme_fit.cscale[0][0], sme_fit.wave[0][indices]) * 1000
     best_fit_synth = sme_fit.synth[0].copy()
 
     sme_fit.linelist = use_list
@@ -389,7 +396,10 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
             plt.axvline(line_wav, c='C1', ls=':', label='', alpha=0.7)
         plt.legend()
 
-        plt.title(f'{ele} {ion} ({line_wav} $\mathrm{{\AA}}$)')
+        if star_name is not None:   
+            plt.title(f'{star_name}, {ele} {ion} ({line_wav} $\mathrm{{\AA}}$)')
+        else:
+            plt.title(f'{ele} {ion} ({line_wav} $\mathrm{{\AA}}$)')
         plt.ylabel('Normalized flux')
 
         ax1 = plt.subplot(212)
@@ -449,7 +459,7 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     del sme_fit
     return (fitresults, EW_all, sigma_EW, fit_flag)
 
-def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_value=None, standard_label=None):
+def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_value=None, standard_label=None, star_name=None):
 
     plt.figure(figsize=(10*1.2, 3*1.2), dpi=150)
     color_i = 0
@@ -483,7 +493,10 @@ def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_
     plt.xticks(fit_line_group_ele['fit_result'].index, ['{:.3f}-\n{:.3f}$\mathrm{{\AA}}$'.format(fit_line_group_ele['fit_result'].loc[i, 'wav_s'], fit_line_group_ele['fit_result'].loc[i, 'wav_e']) for i in fit_line_group_ele['fit_result'].index], rotation=90);
     plt.legend(fontsize=7)
     plt.ylabel(f'A({ele})')
-    plt.title(f"A({ele})={fit_line_group_ele['average_abundance']:.2f}$\pm${fit_line_group_ele['average_abundance_err']:.2f}")
+    if star_name is not None:
+        plt.title(f"{star_name}, A({ele})={fit_line_group_ele['average_abundance']:.2f}$\pm${fit_line_group_ele['average_abundance_err']:.2f}")
+    else:
+        plt.title(f"A({ele})={fit_line_group_ele['average_abundance']:.2f}$\pm${fit_line_group_ele['average_abundance_err']:.2f}")
     plt.tight_layout()
     plt.grid(zorder=0)
     
@@ -494,7 +507,7 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
                 ele_blend=[], ion_fit=[1, 2], nlte_ele=[], result_folder=None, line_mask_remove=None, abund=None, plot=False, standard_values=None, standard_label=None, abund_record=None, 
                 save=False, overwrite=False, central_depth_thres=0.01, cal_central_depth=True, sensitivity_dominance_thres=0.3, line_dominance_thres=0.3, max_line_num=10, 
                 fit_rv=False, telluric_spec=None, max_telluric_depth_thres=None, line_select_save=False, fit_line_group=None, sensitive_synth=None, 
-                blending_line_plot=[], cscale_flag='constant', include_moleculer=False, mu=None):
+                blending_line_plot=[], cscale_flag='constant', include_moleculer=False, mu=None, ele_blend_fit=[], star_name=None):
     '''
     The main function for determining abundances using pysme.
     Input: observed wavelength, normalized flux, teff, logg, [M/H], vmic, vmac, vsini, line_list, pysme initial abundance list, line mask of wavelength to be removed.
@@ -597,7 +610,8 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
                     save_path=f"{result_folder}/{ele}/{ele}_{ion}", atmo=None, plot=plot, fit_rv=fit_rv, telluric_spec=telluric_spec,
                     max_telluric_depth_thres=max_telluric_depth_thres,
                     blending_line_plot=blending_line_plot,line_mask_remove=line_mask_remove,
-                    cscale_flag=cscale_flag, mu=mu)
+                    cscale_flag=cscale_flag, mu=mu,
+                    ele_blend_fit=ele_blend_fit)
 
                     fit_result.append({f'A({ele})':fitresults.values[0], f'err_A({ele})':fitresults.fit_uncertainties[0], 'EW':EW, 'diff_EW':diff_EW, 'flag':fit_flag})
 
@@ -668,6 +682,8 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
         plt.ylabel('A(X)')
         plt.grid()
         plt.tight_layout()
+        if star_name is not None:
+            plt.title(f'{star_name}') 
         plt.savefig(f'{result_folder}/abund-result.pdf')
         plt.close()
 
@@ -694,8 +710,8 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
             plt.ylabel('A(X)$_\mathrm{measure}$ - A(X)$_\mathrm{standard}$')
             plt.tight_layout()
             plt.grid(zorder=0)
-        else:
-            plt.title('No standard value.')
+        if star_name is not None:
+            plt.title(f'{star_name}') 
         plt.savefig(f'{result_folder}/diff-result.pdf')
         plt.close()
 

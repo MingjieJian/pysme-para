@@ -5,7 +5,7 @@ from pysme.synthesize import synthesize_spectrum
 
 from pqdm.processes import pqdm
 from multiprocessing import cpu_count
-from copy import deepcopy
+from copy import deepcopy, copy
 
 import warnings
 
@@ -264,7 +264,7 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
     # sub_sme_all = []
     args = []
     if not parallel:
-        sub_sme = deepcopy(sme)
+        sub_sme = copy(sme)
     for i in tqdm(range(N_chunk)):
         line_wav_start, line_wav_end = sub_wave_range[i]
         wav_start, wav_end = sub_wave_range[i][0], sub_wave_range[i][1]
@@ -285,6 +285,7 @@ def batch_synth(sme, line_list, N_line_chunk=2000, line_margin=2, parallel=False
                 wav, flux, cont = sub_sme.wave[0][wav_indices], sub_sme.synth[0][wav_indices], sub_sme.cont[0][wav_indices]
             else:
                 wav, flux, cont = np.concatenate([wav, sub_sme.wave[0][wav_indices]]), np.concatenate([flux, sub_sme.synth[0][wav_indices]]), np.concatenate([flux, sub_sme.cont[0][wav_indices]])
+                
             # sub_sme_all.append(sub_sme)
 
     if parallel:
