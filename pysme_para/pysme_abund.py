@@ -289,16 +289,52 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     if telluric_spec is not None:
         telluric_spec = telluric_spec[indices]
     # Crop the line list
-    use_list = use_list[(use_list['line_range_e'] > fit_range[0]-synth_margin) & (use_list['line_range_s'] < fit_range[1]+synth_margin)]
+    use_list_fit = use_list[(use_list['line_range_e'] > fit_range[0]-synth_margin) & (use_list['line_range_s'] < fit_range[1]+synth_margin)]
     
     sme_fit = SME_Structure()
     sme_fit.teff, sme_fit.logg, sme_fit.monh, sme_fit.vmic, sme_fit.vmac, sme_fit.vsini = teff, logg, m_h, vmic, vmac, vsini
     sme_fit.iptype = 'gauss'
     sme_fit.ipres = R
     sme_fit.abund = copy(abund)
-    sme_fit.linelist = use_list
+    sme_fit.linelist = use_list_fit
     sme_fit.wave = wav
     sme_fit = synthesize_spectrum(sme_fit)
+    # Do some more synthesis for plotting the blending lines
+    if plot and blending_line_plot != []:
+        
+        sme_blend = SME_Structure()
+        sme_blend.teff, sme_blend.logg, sme_blend.monh, sme_blend.vmic, sme_blend.vmac, sme_blend.vsini = teff, logg, m_h, vmic, vmac, vsini
+        sme_blend.iptype = 'gauss'
+        sme_blend.ipres = R
+        sme_blend.abund = copy(abund)
+        indices = (spec_syn['total']['wave'] >= fit_range[0]-2) & (spec_syn['total']['wave'] <= fit_range[1]+2)
+        sme_blend.wave = spec_syn['total']['wave'][indices]
+        blending_line_spec = {'wav':spec_syn['total']['wave'][indices]}
+
+        for species in blending_line_plot:
+            indices = (use_list['species'] == species) & (use_list['wlcent'] > fit_range[0]-2) & (use_list['wlcent'] < fit_range[1]+2)
+            sme_blend.linelist = use_list[indices]
+            if len(sme_blend.linelist) > 0:
+                print(sme_blend.linelist)
+                sme_blend = synthesize_spectrum(sme_blend)
+                blending_line_spec[species] = copy(sme_blend.synth[0])
+            else:
+                print(f'No line of {species} within the wavelength range.')
+        
+        # Do the final synthesis for all other blending speices
+        indices = (use_list['wlcent'] > fit_range[0]-2) & (use_list['wlcent'] < fit_range[1]+2)
+        for species in blending_line_plot + [f'{ele} {ion}']:
+            indices &= (use_list['species'] != species)
+        sme_blend.linelist = use_list[indices]
+        if len(sme_blend.linelist) > 0:
+            print('Synthesize for all other blending species within the wavelength range.')
+            print(sme_blend.linelist)
+            sme_blend = synthesize_spectrum(sme_blend)
+            blending_line_spec['others'] = copy(sme_blend.synth[0])
+        else:
+            print(f'No line for all other species within the wavelength range.')
+            blending_line_spec['others'] = np.ones_like(sme_blend.wave[0])
+
     sme_fit.spec = flux
     sme_fit.uncs = flux_uncs
     if mu is not None:
@@ -353,7 +389,7 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     EW_all = np.trapz(1-sme_fit.synth[0][indices]/sme_fit.cscale[0][0], sme_fit.wave[0][indices]) * 1000
     best_fit_synth = sme_fit.synth[0].copy()
 
-    sme_fit.linelist = use_list
+    sme_fit.linelist = use_list_fit
     if sme_fit.fitresults['fit_uncertainties'][0] < 8:
         sme_fit.abund[ele] += sme_fit.fitresults['fit_uncertainties'][0] - sme_fit.monh
         sme_fit = synthesize_spectrum(sme_fit)
@@ -381,20 +417,30 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         plt.subplot(211)
         indices = (spec_syn['total']['wave'] >= fit_range[0]-2) & (spec_syn['total']['wave'] <= fit_range[1]+2)
         plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele]['minus'][indices], spec_syn[ele]['plus'][indices], label=f"Synthetic spectra with [{ele}/Fe]$\pm$0.1", alpha=0.5)
-        color_i = 2
-        for ele_blend_single in ele_blend:
-            plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele_blend_single]['minus'][indices], spec_syn[ele_blend_single]['plus'][indices], label=f"Synthetic spectra with [{ele_blend_single}/Fe]$\pm$0.1", alpha=0.3, color=f'C{color_i}')
-            color_i += 1
+        # color_i = 2
+        # for ele_blend_single in ele_blend:
+        #     plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele_blend_single]['minus'][indices], spec_syn[ele_blend_single]['plus'][indices], label=f"Synthetic spectra with [{ele_blend_single}/Fe]$\pm$0.1", alpha=0.3, color=f'C{color_i}')
+        #     color_i += 1
         plt.plot(spec_syn['total']['wave'][indices], spec_syn[ele]['ele_only'][ion][indices], c='C0', label=f"Synthetic spectra with {ele} {ion} line only")
-        # plt.axvline(fit_range[0], color='C1', alpha=0.8, ls='-.')
-        # plt.axvline(fit_range[1], color='C1', alpha=0.8, ls='-.')
+
         plt.axvspan(*fit_range, color='C1', alpha=0.1)
         if type(line_wav) == list:
             for line_wav_single in line_wav:
                 plt.axvline(line_wav_single, c='C1', ls=':', label='', alpha=0.7)
         else:
             plt.axvline(line_wav, c='C1', ls=':', label='', alpha=0.7)
-        plt.legend()
+
+        if blending_line_plot != []:
+            print(blending_line_spec)
+            color_i = 1
+            for species in blending_line_plot:
+                if species in blending_line_spec.keys():
+                    plt.plot(blending_line_spec['wav'], blending_line_spec[species], label=f'Synthetic spectra of {species}', alpha=0.7, color=f'C{color_i}', lw=1, zorder=0)
+                    color_i += 1
+            # if 'others' in blending_line_spec.keys():
+            plt.plot(blending_line_spec['wav'], blending_line_spec['others'], label=f'Synthetic spectra of other species', alpha=0.7, color=f'gray', lw=1, zorder=0)
+
+            plt.legend(loc=4)
 
         if star_name is not None:   
             plt.title(f'{star_name}, {ele} {ion} ({line_wav} $\mathrm{{\AA}}$)')
@@ -420,17 +466,17 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         
         plt.axvspan(*fit_range, color='C1', alpha=0.1)
 
-        bl_count = 2
-        for species in blending_line_plot:
-            t_count = 0
-            indices = (sme_fit.linelist['species'] == species) & (sme_fit.linelist['wlcent'] > wav[0]) & (sme_fit.linelist['wlcent'] < wav[-1])
-            for line_wave in sme_fit.linelist[indices]['wlcent']:
-                if t_count == 0:
-                    plt.plot([line_wave, line_wave], [ylim[0]+(ylim[1]-ylim[0])*6/7, ylim[1]], ls=':', alpha=0.3, label=f'{species} line', c=f'C{bl_count}')
-                else:
-                    plt.plot([line_wave, line_wave], [ylim[0]+(ylim[1]-ylim[0])*6/7, ylim[1]], ls=':', alpha=0.3, c=f'C{bl_count}')
-                t_count += 1
-            bl_count += 1
+        # bl_count = 2
+        # for species in blending_line_plot:
+        #     t_count = 0
+        #     indices = (sme_fit.linelist['species'] == species) & (sme_fit.linelist['wlcent'] > wav[0]) & (sme_fit.linelist['wlcent'] < wav[-1])
+        #     for line_wave in sme_fit.linelist[indices]['wlcent']:
+        #         if t_count == 0:
+        #             plt.plot([line_wave, line_wave], [ylim[0]+(ylim[1]-ylim[0])*6/7, ylim[1]], ls=':', alpha=0.3, label=f'{species} line', c=f'C{bl_count}')
+        #         else:
+        #             plt.plot([line_wave, line_wave], [ylim[0]+(ylim[1]-ylim[0])*6/7, ylim[1]], ls=':', alpha=0.3, c=f'C{bl_count}')
+        #         t_count += 1
+        #     bl_count += 1
 
         if sme_fit.fitresults['fit_uncertainties'][0] < 8:
             plt.title(f"Fitted A({ele})={sme_fit.fitresults['values'][0]:.2f}$\pm${sme_fit.fitresults['fit_uncertainties'][0]:.2f}, $\mathrm{{EW_{{synth, all}}}}$={EW_all:.2f}$\pm${sigma_EW:.2f} m$\mathrm{{\AA}}$, {fit_flag}")
@@ -611,7 +657,7 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
                     max_telluric_depth_thres=max_telluric_depth_thres,
                     blending_line_plot=blending_line_plot,line_mask_remove=line_mask_remove,
                     cscale_flag=cscale_flag, mu=mu,
-                    ele_blend_fit=ele_blend_fit)
+                    ele_blend_fit=ele_blend_fit, star_name=star_name)
 
                     fit_result.append({f'A({ele})':fitresults.values[0], f'err_A({ele})':fitresults.fit_uncertainties[0], 'EW':EW, 'diff_EW':diff_EW, 'flag':fit_flag})
 
@@ -649,9 +695,9 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
 
             if plot:
                 if standard_values is not None:
-                    plot_average_abun(ele, fit_line_group[ele], ion_fit, result_folder, standard_value=standard_values[0][ele_fit_count], standard_label=standard_label)
+                    plot_average_abun(ele, fit_line_group[ele], ion_fit, result_folder, standard_value=standard_values[0][ele_fit_count], standard_label=standard_label, star_name=star_name)
                 else:
-                    plot_average_abun(ele, fit_line_group[ele], ion_fit, result_folder, standard_label=standard_label)
+                    plot_average_abun(ele, fit_line_group[ele], ion_fit, result_folder, standard_label=standard_label, star_name=star_name)
             ele_fit_count += 1
 
             time_chi2_e = time.time()
@@ -681,9 +727,9 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
         plt.legend()
         plt.ylabel('A(X)')
         plt.grid()
-        plt.tight_layout()
         if star_name is not None:
             plt.title(f'{star_name}') 
+        plt.tight_layout()
         plt.savefig(f'{result_folder}/abund-result.pdf')
         plt.close()
 
@@ -712,6 +758,7 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
             plt.grid(zorder=0)
         if star_name is not None:
             plt.title(f'{star_name}') 
+        plt.tight_layout()
         plt.savefig(f'{result_folder}/diff-result.pdf')
         plt.close()
 
