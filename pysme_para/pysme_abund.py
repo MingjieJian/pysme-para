@@ -343,8 +343,11 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     # Add blending abundance to fit, if specified.
     #  Here we put the whole spectra into fitting
     print(f'ele_blend_fit is {ele_blend_fit}')
+    ele_blend_fit_res = {}
     for ele_blend_single in ele_blend_fit:
         sme_fit = solve(sme_fit, [f'abund {ele_blend_single}'], bounds=sme_fit.abund[ele_blend_single]+np.array([-2, 2]))
+        ele_blend_fit_res[f'A({ele_blend_single})_blend'] = sme_fit.fitresults.values[0]
+        ele_blend_fit_res[f'err_A({ele_blend_single})_blend'] = sme_fit.fitresults.fit_uncertainties[0]
         print(f'Fitting blending element: {ele_blend_single}, fitting abundace is: {sme_fit.fitresults["values"]}.')
 
     # Define masks
@@ -503,7 +506,7 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     
     fitresults = copy(sme_fit.fitresults)
     del sme_fit
-    return (fitresults, EW_all, sigma_EW, fit_flag)
+    return fitresults, EW_all, sigma_EW, fit_flag, ele_blend_fit_res
 
 def plot_average_abun(ele, fit_line_group_ele, ion_fit, result_folder, standard_value=None, standard_label=None, star_name=None):
 
@@ -647,20 +650,22 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
                 if len(fit_line_group[ele][ion]) == 0:
                     fit_line_group[ele][ion] = pd.DataFrame(pd.DataFrame(columns=list(fit_line_group[ele][ion].columns) + [f'A({ele})', f'err_A({ele})', 'EW', 'diff_EW', 'flag']))
                 for i in fit_line_group[ele][ion].index:
+                    # Fit the target abundance for each line
                     fit_range = [fit_line_group[ele][ion].loc[i, 'wav_s'],  fit_line_group[ele][ion].loc[i, 'wav_e']]
                     line_wav = fit_line_group[ele][ion].loc[i, 'wlcent']
+                    print(f'Fitting for line {line_wav}.')
 
-                    fitresults, EW, diff_EW, fit_flag = abund_fit(ele, ion, wave, flux, flux_err, line_wav, fit_range, R, teff, logg, m_h, vmic, vmac, vsini, abund, line_list, sensitive_synth,
-                    nlte=nlte_flag,
-                    ele_blend=ele_blend,
-                    save_path=f"{result_folder}/{ele}/{ele}_{ion}", atmo=None, plot=plot, fit_rv=fit_rv, telluric_spec=telluric_spec,
-                    max_telluric_depth_thres=max_telluric_depth_thres,
-                    blending_line_plot=blending_line_plot,line_mask_remove=line_mask_remove,
-                    cscale_flag=cscale_flag, mu=mu,
-                    ele_blend_fit=ele_blend_fit, star_name=star_name)
-
-                    fit_result.append({f'A({ele})':fitresults.values[0], f'err_A({ele})':fitresults.fit_uncertainties[0], 'EW':EW, 'diff_EW':diff_EW, 'flag':fit_flag})
-
+                    fitresults, EW, diff_EW, fit_flag, ele_blend_fit_res = abund_fit(ele, ion, wave, flux, flux_err, line_wav, fit_range, R, teff, logg, m_h, vmic, vmac, vsini, abund, line_list, sensitive_synth,
+                                                                  nlte=nlte_flag,
+                                                                  ele_blend=ele_blend,
+                                                                  save_path=f"{result_folder}/{ele}/{ele}_{ion}", atmo=None, plot=plot, fit_rv=fit_rv, telluric_spec=telluric_spec,
+                                                                  max_telluric_depth_thres=max_telluric_depth_thres,
+                                                                  blending_line_plot=blending_line_plot,line_mask_remove=line_mask_remove,
+                                                                  cscale_flag=cscale_flag, mu=mu,
+                                                                  ele_blend_fit=ele_blend_fit, star_name=star_name)
+                    print('ele_blend_fit_res dict:')
+                    print(ele_blend_fit_res)
+                    fit_result.append({f'A({ele})':fitresults.values[0], f'err_A({ele})':fitresults.fit_uncertainties[0], 'EW':EW, 'diff_EW':diff_EW, 'flag':fit_flag} | ele_blend_fit_res)
                 fit_line_group[ele][ion] = pd.concat([fit_line_group[ele][ion], pd.DataFrame(fit_result)], axis=1)
 
             abun_all = np.concatenate([fit_line_group[ele][i].loc[fit_line_group[ele][i]['flag'] == 'normal', f'A({ele})'].values for i in ion_fit])
