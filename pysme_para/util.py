@@ -456,3 +456,30 @@ def chunk_array(arr, chunk_number):
         chunks.pop()
 
     return chunks
+
+def spectral_segments(wave, factor=3.0):
+    '''
+    Get the range of chunked spectra according to the gaps in wavelength array.
+    '''
+
+    wave = np.asarray(wave)
+    d = np.diff(wave)
+    # 以中位步长的若干倍作为“断点”阈值（避免噪点影响）
+    thr = factor * np.median(d[np.isfinite(d)])
+    # 断点位置索引（gap 大于阈值）
+    cuts = np.where(d > thr)[0]
+    # 把区间端点拼起来
+    starts = np.r_[0, cuts + 1]
+    ends   = np.r_[cuts, len(wave) - 1]
+    return [(wave[s], wave[e]) for s, e in zip(starts, ends)]
+
+from collections.abc import Iterable
+
+def agg_ratio(val):
+    """blending_ratio 的聚合：list -> 1/sum(1/r)；标量 -> float"""
+    if isinstance(val, Iterable) and not isinstance(val, (str, bytes)):
+        arr = np.array(list(val), dtype=float)
+        arr = np.where(arr <= 0, np.nan, arr)        # 非法或0用 NaN
+        inv_sum = np.nansum(1.0 / arr)
+        return float(1.0 / max(inv_sum, 1e-12))       # 防止除0
+    return float(val)

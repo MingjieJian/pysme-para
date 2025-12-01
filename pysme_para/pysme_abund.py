@@ -1,6 +1,6 @@
 from pysme.sme import SME_Structure
 from pysme.abund import Abund
-from pysme.synthesize import synthesize_spectrum
+from pysme.synthesize import synthesize_spectrum, Synthesizer
 from pysme.solve import solve
 
 from . import pysme_synth, util
@@ -17,7 +17,78 @@ def has_overlap(range1, range2):
     """检查两个波长范围是否重叠"""
     return not (range1[1] < range2[0] or range1[0] > range2[1])
 
-def find_line_groups(wave, ele_fit, ion_fit, line_list, v_broad, margin_ratio=2, loggf_cut=None, line_mask_remove=None):
+def blend_ratio_at_R(l0, d0, neigh_lambda, neigh_depth,
+                     R=20000):
+    """
+    Calculate blending ratio at given resolution R.
+    l0:  目标线心 (Å)
+    d0:  目标线在“无限分辨率”下的中心深度 (0~1)
+    neigh_lambda, neigh_depth: 邻近所有线的波长与中心深度（含/不含同元素均可，通常排除目标这条）
+    R:   仪器分辨率
+    v_broad_kms: 估计的内禀速度展宽(热+微湍+旋转)的合成值，km/s
+    """
+    l0 = float(l0)
+    neigh_lambda = np.asarray(neigh_lambda, float)
+    neigh_depth  = np.asarray(neigh_depth,  float)
+
+    FWHM_R = l0 / R
+    sigma_R = FWHM_R / 2.355
+
+    d_lam = neigh_lambda - l0
+    weights = np.exp(-0.5 * (d_lam / sigma_R)**2)
+    B = np.sum(neigh_depth * weights)
+
+    blend_ratio = B / d0
+    return blend_ratio
+
+from numba import njit
+
+@njit
+def _blend_ratio_batch(l0, d0, wl_oth, dep_oth, left_idx, right_idx, R):
+    """
+    对多条目标线批量计算 blending ratio（与原公式一致）
+    """
+    n = l0.size
+    out = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        lam0 = l0[i]
+        sigma = (lam0 / R) / 2.355  # σ_R
+        s = left_idx[i]
+        e = right_idx[i]
+        B = 0.0
+        for j in range(s, e):
+            dl = wl_oth[j] - lam0
+            w = np.exp(-0.5 * (dl / sigma) * (dl / sigma))
+            B += dep_oth[j] * w
+        out[i] = B / d0[i]
+    return out
+
+import numpy as np
+
+def combine_depths(lams, depths, center, R=20000, v_broad_kms=7.0):
+    """
+    将多条近邻线在 center 处合并成一个线深（≤1）。
+    lams, depths : 各线的中心波长与“无限分辨”中心深度 d0_i (0..1)
+    center      : 要评价的中心波长 λ0
+    R           : 仪器分辨率（高斯 LSF 假设）
+    v_broad_kms : 内禀速度展宽(热+微湍+宏湍)的合成，决定 σ
+    """
+    lams    = np.asarray(lams, float)
+    depths  = np.clip(np.asarray(depths, float), 0.0, 0.999999)  # 防止 log 负无穷
+    # 仪器 + 内禀的合成高斯宽度（在 λ0 上）
+    c = 299792.458
+    FWHM_R   = center / R
+    FWHM_int = center * (v_broad_kms / c)
+    sigma = np.hypot(FWHM_R, FWHM_int) / 2.355  # 合成σ（Å）
+    # 线型权重：在 center 处每条线的高斯值
+    w = np.exp(-0.5 * ((lams - center) / sigma) ** 2)
+    # 中心光学厚度
+    tau0 = -np.log(1.0 - depths)
+    # 合并后的线深（≤1）
+    d_comb = 1.0 - np.exp(-np.sum(tau0 * w))
+    return float(d_comb)
+
+def find_line_groups(wave, ele_fit, ion_fit, line_list, v_broad, R=None, margin_ratio=2, loggf_cut=None, line_mask_remove=None, cal_bratio=False):
 
     # Get the line range for fitting
     fit_line_group = {}
@@ -33,7 +104,11 @@ def find_line_groups(wave, ele_fit, ion_fit, line_list, v_broad, margin_ratio=2,
             for i in use_list[use_list['species'] == f'{ele} {ion}'].index:
                 line_wav = use_list._lines.loc[i, 'wlcent']
                 line_cdepth = use_list._lines.loc[i, 'central_depth']
-                fit_line_group_single.append([line_wav, line_cdepth, line_wav * (1-margin_ratio*v_broad / 3e5), line_wav * (1+margin_ratio*v_broad / 3e5)])
+                if 'blending_ratio' in use_list._lines.columns:
+                    line_bratio = use_list._lines.loc[i, 'blending_ratio']
+                    fit_line_group_single.append([line_wav, line_cdepth, line_wav * (1-margin_ratio*v_broad / 3e5), line_wav * (1+margin_ratio*v_broad / 3e5), line_bratio])
+                else:
+                    fit_line_group_single.append([line_wav, line_cdepth, line_wav * (1-margin_ratio*v_broad / 3e5), line_wav * (1+margin_ratio*v_broad / 3e5)])
             
             # Remove the line group outside the observed spectra
             fit_line_group_single = [ele for ele in fit_line_group_single if ele[2] >= np.min(wave) and ele[3] <= np.max(wave) and len(wave[(wave>=ele[2]) & (wave<=ele[3])]) > 1]
@@ -43,6 +118,52 @@ def find_line_groups(wave, ele_fit, ion_fit, line_list, v_broad, margin_ratio=2,
                 fit_line_group_single = [ele for ele in fit_line_group_single 
                                        if not any(has_overlap([ele[2], ele[3]], mask) 
                                                 for mask in line_mask_remove)]
+
+            # if len() > 1000:
+            #     fit_line_group_single = [ele for ele in fit_line_group_single 
+            #                            if not any(has_overlap([ele[2], ele[3]], mask) 
+            #                                     for mask in line_mask_remove)]
+
+            # if cal_bratio:
+            #     print(f'Calculating blending ratios for {ele} {ion}.', flush=True)
+            #     for i in tqdm(range(len(fit_line_group_single)), miniters=100):
+            #         # Calculate the blending ratio
+            #         line_wav = fit_line_group_single[i][0]
+            #         line_cdepth = fit_line_group_single[i][1]
+            #         indices = (np.abs(use_list['wlcent'] - line_wav) < 5) & (use_list['species'] != f'{ele} {ion}')
+            #         neigh_lambda = use_list['wlcent'][indices]
+            #         neigh_depth  = use_list['central_depth'][indices]
+            #         line_bratio = blend_ratio_at_R(line_wav, line_cdepth, neigh_lambda, neigh_depth, R=R)
+            #         fit_line_group_single[i].append(line_bratio)
+
+            if cal_bratio:
+                print(f'Calculating blending ratios for {ele} {ion}.', flush=True)
+
+                
+                # 只保留“其他元素”的谱线一次性构造（避免每条线都做 != 比较与切片）
+                mask_others = (use_list['species'] != f'{ele} {ion}')
+                wl_oth  = use_list['wlcent'][mask_others]
+                dep_oth = use_list['central_depth'][mask_others]
+
+                # 预排序以便 searchsorted 取窗口
+                order = np.argsort(wl_oth)
+                wl_oth  = wl_oth[order]
+                dep_oth = dep_oth[order]
+
+                # 从你的 fit_line_group_single 中取目标线的 λ 和 d（一次性向量化取出）
+                l0 = np.array([item[0] for item in fit_line_group_single], dtype=float)
+                d0 = np.array([item[1] for item in fit_line_group_single], dtype=float)
+
+                # 对每条目标线计算 ±5 Å 的窗口索引（不生成大布尔数组）
+                left_idx  = np.searchsorted(wl_oth, l0 - 5.0, side='left')
+                right_idx = np.searchsorted(wl_oth, l0 + 5.0, side='right')
+
+                # 批量算 blending ratio
+                bratios = _blend_ratio_batch(l0, d0, wl_oth, dep_oth, left_idx, right_idx, R)
+
+                for i, br in enumerate(bratios):
+                    # 保持你原先的结构：在每个 [wav, cdepth, ...] 末尾 append ratio
+                    fit_line_group_single[i].append(float(br))
 
             # Merge the line_group if they are connected
             fit_line_group_single.sort(key=lambda x: x[0])
@@ -64,10 +185,71 @@ def find_line_groups(wave, ele_fit, ion_fit, line_list, v_broad, margin_ratio=2,
                         if type(last_range[1]) != list:
                             last_range[1] = [last_range[1]]
                         last_range[1].append(current_range[1])
+                        if 'blending_ratio' in use_list._lines.columns or cal_bratio:
+                            if type(last_range[4]) != list:
+                                last_range[4] = [last_range[4]]
+                            last_range[4].append(current_range[4])    
                     else:
                         merged_ranges.append(current_range)
-            fit_line_group[ele][ion] = [{'wlcent':ele[0], 'central_depth':ele[1], 'wav_s':ele[2], 'wav_e':ele[3]} for ele in merged_ranges]
+            
+            if 'blending_ratio' in use_list._lines.columns or cal_bratio:
+                fit_line_group[ele][ion] = [{'wlcent':ele[0], 'central_depth':ele[1], 'blending_ratio':ele[4], 'wav_s':ele[2], 'wav_e':ele[3], 'central_depth_eff':np.sum(ele[1]), 'blending_ratio_eff':util.agg_ratio(ele[4])} for ele in merged_ranges if np.sum(ele[1]) > 0.1]
+            else:
+                fit_line_group[ele][ion] = [{'wlcent':ele[0], 'central_depth':ele[1], 'wav_s':ele[2], 'wav_e':ele[3], 'central_depth_eff':np.sum(ele[1])} for ele in merged_ranges if np.sum(ele[1]) > 0.1]
+            
+            
     return fit_line_group
+
+def rank_lines(lines, top_N=None, beta=0.10,  # 深度“偏好更深”权重
+               gamma=1.0, r_cap=2.5,   # 混合度衰减与封顶
+               hard_penalty=0.2, r_hard=1.5,  # r>1.5 的硬惩罚
+               w_depth=0.5, w_blend=0.5):
+    """
+    Rank the lines according to their central depth and blending ratio.
+    lines: pd.DataFrame 或 list[dict]，至少包含
+           'central_depth', 'blending_ratio'（其他字段原样保留）
+    返回：(sorted_list, topN_list) 或 DataFrame（当 return_dataframe=True）
+    """
+    # --- 统一为 DataFrame ---
+    if isinstance(lines, pd.DataFrame):
+        df = lines.copy()
+    else:
+        df = pd.DataFrame(lines)
+
+    # 取需要的列（缺则报错更清楚）
+    if not {'central_depth', 'blending_ratio'}.issubset(df.columns):
+        raise ValueError("Input must contain 'central_depth' and 'blending_ratio'.")
+    if not {'central_depth_eff', 'blending_ratio_eff'}.issubset(df.columns):
+        df['central_depth_eff'] = df['central_depth']
+        df['blending_ratio_eff'] = df['blending_ratio']
+
+    d = df['central_depth_eff'].to_numpy(float)
+    r = df['blending_ratio_eff'].to_numpy(float)
+
+    # 1) 深度得分（接近0.5好；等距时更深好）
+    depth_core = 1.0 - np.abs(d - 0.5)
+    depth_bias = beta * (d - 0.5)
+    depth_score = np.clip(depth_core + depth_bias, 0.0, 1.0)
+
+    # 2) 混合度得分（越小越好；>1.5 强惩罚）
+    r_eff = np.minimum(r, r_cap)
+    blend_score = np.exp(-gamma * r_eff)
+    blend_score *= np.where(r > r_hard, hard_penalty, 1.0)
+
+    # 3) 综合分数（几何平均）
+    score = (depth_score ** w_depth) * (blend_score ** w_blend)
+
+    df['depth_score'] = depth_score
+    df['blend_score'] = blend_score
+    df['score'] = score
+
+    df_sorted = df.sort_values('score', ascending=False)
+    if top_N is not None:
+        df_top = df_sorted.head(top_N)
+    else:
+        df_top = df_sorted
+
+    return df_top.reset_index(drop=True)
 
 def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit, ion_fit, fit_line_group, nlte_ele=[], include_moleculer=False, varied_para=None, cdepth_thres=0):
     '''
@@ -271,7 +453,7 @@ def is_within_ranges(line_wav, line_mask_remove):
     return np.all(mask)  # 保持输入输出一致性
 
 def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg, m_h, vmic, vmac, vsini, abund, use_list, 
-              spec_syn, synth_margin=5,
+              spec_syn=None, synth_margin=5,
               ele_blend=[], ele_blend_fit=[],
               save_path=None, plot=False, atmo=None, nlte=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=0.1,
               synth_cont_level=0.025, cscale_flag='constant', mu=None,
@@ -418,13 +600,10 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     if plot:
         plt.figure(figsize=(10, 6))
         plt.subplot(211)
-        indices = (spec_syn['total']['wave'] >= fit_range[0]-2) & (spec_syn['total']['wave'] <= fit_range[1]+2)
-        plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele]['minus'][indices], spec_syn[ele]['plus'][indices], label=f"Synthetic spectra with [{ele}/Fe]$\pm$0.1", alpha=0.5)
-        # color_i = 2
-        # for ele_blend_single in ele_blend:
-        #     plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele_blend_single]['minus'][indices], spec_syn[ele_blend_single]['plus'][indices], label=f"Synthetic spectra with [{ele_blend_single}/Fe]$\pm$0.1", alpha=0.3, color=f'C{color_i}')
-        #     color_i += 1
-        plt.plot(spec_syn['total']['wave'][indices], spec_syn[ele]['ele_only'][ion][indices], c='C0', label=f"Synthetic spectra with {ele} {ion} line only")
+        if spec_syn is not None:
+            indices = (spec_syn['total']['wave'] >= fit_range[0]-2) & (spec_syn['total']['wave'] <= fit_range[1]+2)
+            plt.fill_between(spec_syn['total']['wave'][indices], spec_syn[ele]['minus'][indices], spec_syn[ele]['plus'][indices], label=f"Synthetic spectra with [{ele}/Fe]$\pm$0.1", alpha=0.5)
+            plt.plot(spec_syn['total']['wave'][indices], spec_syn[ele]['ele_only'][ion][indices], c='C0', label=f"Synthetic spectra with {ele} {ion} line only")
 
         plt.axvspan(*fit_range, color='C1', alpha=0.1)
         if type(line_wav) == list:
@@ -556,7 +735,8 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
                 ele_blend=[], ion_fit=[1, 2], nlte_ele=[], result_folder=None, line_mask_remove=None, abund=None, plot=False, standard_values=None, standard_label=None, abund_record=None, 
                 save=False, overwrite=False, central_depth_thres=0.01, cal_central_depth=True, sensitivity_dominance_thres=0.3, line_dominance_thres=0.3, max_line_num=10, 
                 fit_rv=False, telluric_spec=None, max_telluric_depth_thres=None, line_select_save=False, fit_line_group=None, sensitive_synth=None, 
-                blending_line_plot=[], cscale_flag='constant', include_moleculer=False, mu=None, ele_blend_fit=[], star_name=None):
+                blending_line_plot=[], cscale_flag='constant', include_moleculer=False, mu=None, ele_blend_fit=[], star_name=None, line_select_method='sensitive', line_selection_dict=None, margin_ratio=2,
+                cdr_database=None, cdr_negligibe_database=None):
     '''
     The main function for determining abundances using pysme.
     Input: observed wavelength, normalized flux, teff, logg, [M/H], vmic, vmac, vsini, line_list, pysme initial abundance list, line mask of wavelength to be removed.
@@ -603,6 +783,15 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
 
     v_broad = np.sqrt(vmic**2 + vsini**2 + (3e5/R)**2)
 
+    s = Synthesizer()
+    sme = SME_Structure()
+    sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, m_h, vmic, vmac, vsini
+    if cdr_database is not None:
+        sme.linelist = line_list
+        sme = s.update_cdr(sme, cdr_database=cdr_database)
+    elif cdr_negligibe_database is not None:
+        sme.linelist = line_list
+        s.flag_strong_lines_by_database(sme, cdr_negligibe_database=cdr_negligibe_database)
     if 'central_depth' not in line_list.columns or 'line_range_s' not in line_list.columns or 'line_range_e' not in line_list.columns or cal_central_depth:
         # Calculate the central_depth and line_range, if required or no such column
         sme = SME_Structure()
@@ -610,19 +799,48 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
         line_list = pysme_synth.get_cdepth_range(sme, line_list, parallel=True, n_jobs=10)
     line_list = line_list[(line_list['central_depth'] > central_depth_thres) | (line_list['species'] == 'Li 1')]
 
-    # Generate synthetic and sensitive spectra using current parameters
-    if fit_line_group is not None and sensitive_synth is not None:
-        print('Using the provided line selection and sensitive spectra.')
-        pass
+    # Select the lines to fit
+    print(f'Line selection method: {line_select_method}.', flush=True)
+    if line_select_method == 'sensitive':
+        # Method 1: use sensitive spectra by calculation
+        # Generate synthetic and sensitive spectra using current parameters
+        if fit_line_group is not None and sensitive_synth is not None:
+            print('Using the provided line selection and sensitive spectra.')
+            pass
+        else:
+            fit_line_group = find_line_groups(wave, ele_fit+ele_blend, ion_fit, line_list, v_broad)
+            sensitive_synth = get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit+ele_blend, ion_fit, fit_line_group, nlte_ele=nlte_ele, include_moleculer=include_moleculer)
+            fit_line_group = select_lines(fit_line_group, sensitive_synth, ele_fit+ele_blend, ion_fit, sensitivity_dominance_thres=sensitivity_dominance_thres, line_dominance_thres=line_dominance_thres, max_line_num=max_line_num, output_all=False)
+            if line_select_save:
+                pickle.dump(fit_line_group, open(f'{result_folder}/line_selection.pkl', 'wb'))
+                pickle.dump(sensitive_synth, open(f'{result_folder}/sensitive_synth.pkl', 'wb'))
+    elif line_select_method == 'central_depth':
+        # Method 2: use central depth directly
+        fit_line_group = find_line_groups(wave, ele_fit+ele_blend, ion_fit, line_list, v_broad, 20000, cal_bratio=True)
+
+        for ele in fit_line_group.keys():
+            for ion in fit_line_group[ele].keys():
+                if len(fit_line_group[ele][ion]) > 0:
+                    fit_line_group[ele][ion] = rank_lines(fit_line_group[ele][ion], top_N=max_line_num)
+                else:
+                    fit_line_group[ele][ion] = pd.DataFrame(columns=['wlcent', 'central_depth', 'blending_ratio', 'wav_s', 'wav_e','central_depth_eff', 'blending_ratio_eff', 'depth_score', 'blend_score', 'score'])
+        pickle.dump(fit_line_group, open(f'{result_folder}/line_selection_cd.pkl', 'wb'))
+        sensitive_synth = None
+    elif line_select_method == 'pre_defined' and line_selection_dict is not None:
+        fit_line_group = line_selection_dict
+
+        # Update wav_s and wav_e  in case they are not included
+        for ele in fit_line_group.keys():
+            for ion in fit_line_group[ele].keys():
+                if 'wav_s' not in fit_line_group[ele][ion].columns or 'wav_e' not in fit_line_group[ele][ion].columns:
+                    fit_line_group[ele][ion]['wav_s'] = fit_line_group[ele][ion]['wlcent'] * (1 - margin_ratio * v_broad / 3e5)
+                    fit_line_group[ele][ion]['wav_e'] = fit_line_group[ele][ion]['wlcent'] * (1 + margin_ratio * v_broad / 3e5)
+        sensitive_synth = None
     else:
-        fit_line_group = find_line_groups(wave, ele_fit+ele_blend, ion_fit, line_list, v_broad)
-        sensitive_synth = get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit+ele_blend, ion_fit, fit_line_group, nlte_ele=nlte_ele, include_moleculer=include_moleculer)
-        fit_line_group = select_lines(fit_line_group, sensitive_synth, ele_fit+ele_blend, ion_fit, sensitivity_dominance_thres=sensitivity_dominance_thres, line_dominance_thres=line_dominance_thres, max_line_num=max_line_num, output_all=False)
-        if line_select_save:
-            pickle.dump(fit_line_group, open(f'{result_folder}/line_selection.pkl', 'wb'))
-            pickle.dump(sensitive_synth, open(f'{result_folder}/sensitive_synth.pkl', 'wb'))
+        raise ValueError('Invalid line selection method.')
 
     time_select_line_e = time.time()
+    print(f'Line selection time: {time_select_line_e - time_select_line_s:.2f} s.', flush=True)
 
     with redirect_stdout(open(log_file, 'w')):
         # Iterate for all the elements
