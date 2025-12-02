@@ -481,6 +481,7 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     sme_fit.linelist = use_list_fit
     sme_fit.wave = wav
     sme_fit = synthesize_spectrum(sme_fit)
+
     # Do some more synthesis for plotting the blending lines
     if plot and blending_line_plot != []:
         
@@ -789,15 +790,18 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
     if cdr_database is not None:
         sme.linelist = line_list
         sme = s.update_cdr(sme, cdr_database=cdr_database)
+        line_list = sme.linelist
+        line_list = line_list[(line_list['central_depth'] > central_depth_thres) | (line_list['species'] == 'Li 1')]
     elif cdr_negligibe_database is not None:
         sme.linelist = line_list
         s.flag_strong_lines_by_database(sme, cdr_negligibe_database=cdr_negligibe_database)
-    if 'central_depth' not in line_list.columns or 'line_range_s' not in line_list.columns or 'line_range_e' not in line_list.columns or cal_central_depth:
+        line_list = sme.linelist
+    elif 'central_depth' not in line_list.columns or 'line_range_s' not in line_list.columns or 'line_range_e' not in line_list.columns or cal_central_depth:
         # Calculate the central_depth and line_range, if required or no such column
         sme = SME_Structure()
         sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, m_h, vmic, vmac, vsini
         line_list = pysme_synth.get_cdepth_range(sme, line_list, parallel=True, n_jobs=10)
-    line_list = line_list[(line_list['central_depth'] > central_depth_thres) | (line_list['species'] == 'Li 1')]
+        line_list = line_list[(line_list['central_depth'] > central_depth_thres) | (line_list['species'] == 'Li 1')]
 
     # Select the lines to fit
     print(f'Line selection method: {line_select_method}.', flush=True)
@@ -832,6 +836,8 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
         # Update wav_s and wav_e  in case they are not included
         for ele in fit_line_group.keys():
             for ion in fit_line_group[ele].keys():
+                fit_line_group[ele][ion] = util.filter_lines_in_spectrum(fit_line_group[ele][ion], wave, wl_col='wlcent', gap_factor=5.0)
+                fit_line_group[ele][ion] = fit_line_group[ele][ion].sort_values('avg_purity', ascending=False)[:max_line_num]
                 if 'wav_s' not in fit_line_group[ele][ion].columns or 'wav_e' not in fit_line_group[ele][ion].columns:
                     fit_line_group[ele][ion]['wav_s'] = fit_line_group[ele][ion]['wlcent'] * (1 - margin_ratio * v_broad / 3e5)
                     fit_line_group[ele][ion]['wav_e'] = fit_line_group[ele][ion]['wlcent'] * (1 + margin_ratio * v_broad / 3e5)

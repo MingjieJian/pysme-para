@@ -483,3 +483,63 @@ def agg_ratio(val):
         inv_sum = np.nansum(1.0 / arr)
         return float(1.0 / max(inv_sum, 1e-12))       # 防止除0
     return float(val)
+
+def filter_lines_in_spectrum(df, wave, wl_col='wlcent', gap_factor=5.0):
+    """
+    Remove lines whose central wavelength is not covered by
+    the given spectrum wavelength array (with possible gaps).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Table of lines. Must contain a wavelength column (default 'wlcent').
+    wave : array-like
+        1D wavelength array of the spectrum. Can contain gaps and be unsorted.
+    wl_col : str, default 'wlcent'
+        Column name in df for the line central wavelength.
+    gap_factor : float, default 5.0
+        A gap is defined where the spacing between two neighbouring pixels
+        is larger than gap_factor * median(delta_lambda). Increase this if
+        your sampling is very irregular.
+
+    Returns
+    -------
+    df_sel : pandas.DataFrame
+        Subset of df with lines whose wlcent falls inside any covered region.
+    """
+
+    # ---- 1. Prepare wavelength array & identify gaps ----
+    wave = np.asarray(wave, dtype=float)
+    wave = np.sort(wave)               # ensure monotonic
+
+    if wave.size < 2:
+        # trivial case: only one pixel -> only lines exactly at this wavelength
+        mask = (df[wl_col].values == wave[0])
+        return df.loc[mask].copy()
+
+    diffs = np.diff(wave)
+    median_step = np.median(diffs)
+
+    # define gaps where spacing is much larger than the typical step
+    gap_mask = diffs > gap_factor * median_step
+    # indices *after* which a new segment starts
+    gap_indices = np.where(gap_mask)[0]
+
+    # ---- 2. Build coverage segments [λ_start, λ_end] ----
+    segments = []
+    start_idx = 0
+    for gi in gap_indices:
+        end_idx = gi  # inclusive
+        segments.append((wave[start_idx], wave[end_idx]))
+        start_idx = gi + 1
+    # last segment
+    segments.append((wave[start_idx], wave[-1]))
+
+    # ---- 3. Filter lines by checking whether wlcent is in any segment ----
+    wl_lines = df[wl_col].values.astype(float)
+    line_mask = np.zeros(df.shape[0], dtype=bool)
+
+    for (lam_min, lam_max) in segments:
+        line_mask |= (wl_lines >= lam_min) & (wl_lines <= lam_max)
+
+    return df.loc[line_mask].copy()

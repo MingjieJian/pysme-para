@@ -461,7 +461,10 @@ for f in files:
 gebv   = np.array(gebv)
 gri_bc = np.array(gri_bc)
 
-parsec = Table.read(pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/parsec_isochrones/parsec_isochrones_logt_8p00_0p01_10p17_mh_m2p75_0p25_m0p75_mh_m0p60_0p10_0p70_GaiaEDR3_2MASS.fits"))
+try:
+    parsec = Table.read(pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/parsec_isochrones/parsec_isochrones_logt_8p00_0p01_10p17_mh_m2p75_0p25_m0p75_mh_m0p60_0p10_0p70_GaiaEDR3_2MASS.fits"))
+except:
+    pass
 
 def bcstar(teff,logg,feh,alpha_fe):
     '''
