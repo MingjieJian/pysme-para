@@ -1,4 +1,4 @@
-pysme-astro
+pysme-astro==1.0.1
 pqdm
 spectres
 scipy

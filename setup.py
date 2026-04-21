@@ -2,7 +2,7 @@ import setuptools
 
 setuptools.setup(
     name='pysme_para',
-    version='0.0.1',
+    version='0.1.0',
     description='pysme-para.',
     url='https://github.com/MingjieJian/pysme-para.git',
     author='Mingjie Jian',
@@ -17,7 +17,7 @@ setuptools.setup(
     ],
     python_requires=">=3.5",
     install_requires=[
-        "pysme-astro",
+        "pysme-astro==1.0.1",
         "pqdm",
         "spectres",
         "scipy",
