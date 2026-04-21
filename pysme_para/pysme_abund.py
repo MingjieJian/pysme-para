@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import os, time, pickle
 from contextlib import redirect_stdout
 from tqdm import tqdm
-from copy import copy
+from copy import copy, deepcopy
 
 def has_overlap(range1, range2):
     """检查两个波长范围是否重叠"""
@@ -251,7 +251,7 @@ def rank_lines(lines, top_N=None, beta=0.10,  # 深度“偏好更深”权重
 
     return df_top.reset_index(drop=True)
 
-def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit, ion_fit, fit_line_group, nlte_ele=[], include_moleculer=False, varied_para=None, cdepth_thres=0):
+def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit, ion_fit, fit_line_group, nlte_ele=[], include_moleculer=False, varied_para=None, cdepth_thres=0, batch_synth_n_jobs=10):
     '''
     varied_para : default None. if specified, will only change the specified parameter.
     '''
@@ -282,7 +282,7 @@ def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, 
         sme.nlte.set_nlte(nlte_ele_single)
     # if cdepth_thres > 0:
     cdepth_indices = line_list['central_depth'] > cdepth_thres
-    spec_syn_all = pysme_synth.batch_synth(sme, line_list[cdepth_indices], parallel=True, n_jobs=10)
+    spec_syn_all = pysme_synth.batch_synth(sme, line_list[cdepth_indices], parallel=True, n_jobs=batch_synth_n_jobs)
 
     # Calculate the sensitive spectra for the fitting elements.
     spec_syn = {}
@@ -316,7 +316,7 @@ def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, 
         sme.wave[0] = wave
 
         if len(sme.wave[0]) > 2:
-            spec_syn_plus = pysme_synth.batch_synth(sme, line_list[cdepth_indices], parallel=True, n_jobs=10)
+            spec_syn_plus = pysme_synth.batch_synth(sme, line_list[cdepth_indices], parallel=True, n_jobs=batch_synth_n_jobs)
             flux_syn_plus = spec_syn_plus[1]
         sme.abund = abund
         if varied_para is None:
@@ -336,7 +336,7 @@ def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, 
             elif varied_para == 'vsini':
                 sme.vsini -= 2*param_variations[varied_para]
         if len(sme.wave[0]) > 2:
-            spec_syn_minus = pysme_synth.batch_synth(sme, line_list[cdepth_indices], parallel=True, n_jobs=10)
+            spec_syn_minus = pysme_synth.batch_synth(sme, line_list[cdepth_indices], parallel=True, n_jobs=batch_synth_n_jobs)
             flux_syn_minus = spec_syn_minus[1]
         
         # Back to the input value
@@ -368,7 +368,7 @@ def get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, 
                 for mole_species in moleculer_line_dict[ele]:
                     indices |= line_list['species'] == f'{mole_species}'
             try:
-                spec_syn_ion = pysme_synth.batch_synth(sme, line_list[indices & cdepth_indices], parallel=True, n_jobs=10)
+                spec_syn_ion = pysme_synth.batch_synth(sme, line_list[indices & cdepth_indices], parallel=True, n_jobs=batch_synth_n_jobs)
                 flux_syn_ion[ion] = spec_syn_ion[1]
             except:
                 pass
@@ -452,12 +452,51 @@ def is_within_ranges(line_wav, line_mask_remove):
     
     return np.all(mask)  # 保持输入输出一致性
 
+
+def _configure_line_selection_runtime(
+    sme,
+    line_select_method_internal,
+    line_select_recompute,
+    line_select_reuse,
+    line_select_parallel,
+    line_select_n_jobs,
+):
+    """Attach PySME line-selection controls to an SME object."""
+
+    sme.line_select_method = line_select_method_internal
+    sme.line_select_recompute = line_select_recompute
+    sme.line_select_reuse = line_select_reuse
+    sme.line_select_parallel = bool(line_select_parallel)
+    sme.line_select_n_jobs = int(line_select_n_jobs) if line_select_n_jobs is not None else 1
+    return sme
+
+
+def _build_runtime_kwargs(
+    linelist_mode,
+    smelib_lineinfo_mode,
+    line_precompute_database,
+    cdr_database,
+    keep_line_opacity,
+):
+    """Common PySME runtime kwargs for synthesis/solve."""
+
+    return {
+        'linelist_mode': linelist_mode,
+        'smelib_lineinfo_mode': smelib_lineinfo_mode,
+        'line_precompute_database': line_precompute_database,
+        'cdr_database': cdr_database,
+        'keep_line_opacity': keep_line_opacity,
+    }
+
 def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg, m_h, vmic, vmac, vsini, abund, use_list, 
               spec_syn=None, synth_margin=5,
               ele_blend=[], ele_blend_fit=[],
               save_path=None, plot=False, atmo=None, nlte=False, fit_rv=False, telluric_spec=None, max_telluric_depth_thres=0.1,
               synth_cont_level=0.025, cscale_flag='constant', mu=None,
-              blending_line_plot=[], line_mask_remove=None, star_name=None):
+              blending_line_plot=[], line_mask_remove=None, star_name=None, target_species_only=False,
+              linelist_mode='all', smelib_lineinfo_mode=0, line_precompute_database=None, cdr_database=None,
+              line_select_method_internal='internal', line_select_recompute='if_stale', line_select_reuse='none',
+              line_select_parallel=False, line_select_n_jobs=1, keep_line_opacity=False):
 
     '''
     Fit the abundance of a single line.
@@ -472,6 +511,13 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         telluric_spec = telluric_spec[indices]
     # Crop the line list
     use_list_fit = use_list[(use_list['line_range_e'] > fit_range[0]-synth_margin) & (use_list['line_range_s'] < fit_range[1]+synth_margin)]
+    if target_species_only:
+        target_species = f'{ele} {ion}'
+        use_list_fit = use_list_fit[use_list_fit['species'] == target_species]
+
+    if len(use_list_fit) == 0:
+        fitresults = {'values': [np.nan], 'fit_uncertainties': [np.nan]}
+        return fitresults, np.nan, np.nan, 'missing_target_line', {}
     
     sme_fit = SME_Structure()
     sme_fit.teff, sme_fit.logg, sme_fit.monh, sme_fit.vmic, sme_fit.vmac, sme_fit.vsini = teff, logg, m_h, vmic, vmac, vsini
@@ -480,7 +526,22 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     sme_fit.abund = copy(abund)
     sme_fit.linelist = use_list_fit
     sme_fit.wave = wav
-    sme_fit = synthesize_spectrum(sme_fit)
+    sme_fit = _configure_line_selection_runtime(
+        sme_fit,
+        line_select_method_internal=line_select_method_internal,
+        line_select_recompute=line_select_recompute,
+        line_select_reuse=line_select_reuse,
+        line_select_parallel=line_select_parallel,
+        line_select_n_jobs=line_select_n_jobs,
+    )
+    runtime_kwargs = _build_runtime_kwargs(
+        linelist_mode=linelist_mode,
+        smelib_lineinfo_mode=smelib_lineinfo_mode,
+        line_precompute_database=line_precompute_database,
+        cdr_database=cdr_database,
+        keep_line_opacity=keep_line_opacity,
+    )
+    sme_fit = synthesize_spectrum(sme_fit, **runtime_kwargs)
 
     # Do some more synthesis for plotting the blending lines
     if plot and blending_line_plot != []:
@@ -499,7 +560,15 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
             sme_blend.linelist = use_list[indices]
             if len(sme_blend.linelist) > 0:
                 print(sme_blend.linelist)
-                sme_blend = synthesize_spectrum(sme_blend)
+                sme_blend = _configure_line_selection_runtime(
+                    sme_blend,
+                    line_select_method_internal=line_select_method_internal,
+                    line_select_recompute=line_select_recompute,
+                    line_select_reuse=line_select_reuse,
+                    line_select_parallel=line_select_parallel,
+                    line_select_n_jobs=line_select_n_jobs,
+                )
+                sme_blend = synthesize_spectrum(sme_blend, **runtime_kwargs)
                 blending_line_spec[species] = copy(sme_blend.synth[0])
             else:
                 print(f'No line of {species} within the wavelength range.')
@@ -512,7 +581,15 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         if len(sme_blend.linelist) > 0:
             print('Synthesize for all other blending species within the wavelength range.')
             print(sme_blend.linelist)
-            sme_blend = synthesize_spectrum(sme_blend)
+            sme_blend = _configure_line_selection_runtime(
+                sme_blend,
+                line_select_method_internal=line_select_method_internal,
+                line_select_recompute=line_select_recompute,
+                line_select_reuse=line_select_reuse,
+                line_select_parallel=line_select_parallel,
+                line_select_n_jobs=line_select_n_jobs,
+            )
+            sme_blend = synthesize_spectrum(sme_blend, **runtime_kwargs)
             blending_line_spec['others'] = copy(sme_blend.synth[0])
         else:
             print(f'No line for all other species within the wavelength range.')
@@ -528,7 +605,12 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     print(f'ele_blend_fit is {ele_blend_fit}')
     ele_blend_fit_res = {}
     for ele_blend_single in ele_blend_fit:
-        sme_fit = solve(sme_fit, [f'abund {ele_blend_single}'], bounds=sme_fit.abund[ele_blend_single]+np.array([-2, 2]))
+        sme_fit = solve(
+            sme_fit,
+            [f'abund {ele_blend_single}'],
+            bounds=sme_fit.abund[ele_blend_single]+np.array([-2, 2]),
+            **runtime_kwargs,
+        )
         ele_blend_fit_res[f'A({ele_blend_single})_blend'] = sme_fit.fitresults.values[0]
         ele_blend_fit_res[f'err_A({ele_blend_single})_blend'] = sme_fit.fitresults.fit_uncertainties[0]
         print(f'Fitting blending element: {ele_blend_single}, fitting abundace is: {sme_fit.fitresults["values"]}.')
@@ -564,11 +646,74 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
         sme_fit.fitresults['fit_uncertainties'] = [np.nan]
         sme_fit.synth = [[np.nan]*len(sme_fit.wave[0])]
     else:
-        if fit_rv:
-            sme_fit = solve(sme_fit, [f'abund {ele}', 'vrad'])
-        else:
-            sme_fit = solve(sme_fit, [f'abund {ele}'])
         fit_flag = 'normal'
+        if ele == 'Li':
+            # For weak Li lines, use two starts and a coarse->fine Jacobian step schedule.
+            param_names = [f'abund {ele}'] + (['vrad'] if fit_rv else [])
+            li_start_boost_dex = 1.0
+            li_coarse_step = 0.10
+            li_fine_step = 0.02
+            rv_coarse_step = 0.20
+            rv_fine_step = 0.05
+
+            try:
+                li_base = float(sme_fit.abund[ele])
+            except Exception:
+                li_base = np.nan
+            li_starts = [li_base, li_base + li_start_boost_dex]
+            li_starts = [float(x) for x in li_starts if np.isfinite(x)]
+            li_starts = list(dict.fromkeys(li_starts))
+            if len(li_starts) == 0:
+                li_starts = [0.0]
+
+            best_sme = None
+            best_chisq = np.inf
+
+            for i_trial, li_start in enumerate(li_starts, start=1):
+                try:
+                    sme_trial = deepcopy(sme_fit)
+                    sme_trial.abund[ele] = li_start
+
+                    if fit_rv:
+                        coarse_steps = np.array([li_coarse_step, rv_coarse_step], dtype=float)
+                        fine_steps = np.array([li_fine_step, rv_fine_step], dtype=float)
+                    else:
+                        coarse_steps = np.array([li_coarse_step], dtype=float)
+                        fine_steps = np.array([li_fine_step], dtype=float)
+
+                    sme_trial = solve(sme_trial, param_names, step_sizes=coarse_steps, **runtime_kwargs)
+                    sme_trial = solve(sme_trial, param_names, step_sizes=fine_steps, **runtime_kwargs)
+
+                    try:
+                        chisq = float(sme_trial.fitresults['chisq'])
+                    except Exception:
+                        chisq = float(getattr(sme_trial.fitresults, 'chisq', np.inf))
+                    print(
+                        f'Li multi-start trial {i_trial}/{len(li_starts)}: '
+                        f'init={li_start:.2f}, chisq={chisq:.6g}'
+                    )
+
+                    if np.isfinite(chisq) and chisq < best_chisq:
+                        best_chisq = chisq
+                        best_sme = sme_trial
+                except Exception as exc:
+                    print(
+                        f'Li multi-start trial {i_trial}/{len(li_starts)} failed '
+                        f'(init={li_start:.2f}): {exc}'
+                    )
+
+            if best_sme is not None:
+                sme_fit = best_sme
+            else:
+                if fit_rv:
+                    sme_fit = solve(sme_fit, [f'abund {ele}', 'vrad'], **runtime_kwargs)
+                else:
+                    sme_fit = solve(sme_fit, [f'abund {ele}'], **runtime_kwargs)
+        else:
+            if fit_rv:
+                sme_fit = solve(sme_fit, [f'abund {ele}', 'vrad'], **runtime_kwargs)
+            else:
+                sme_fit = solve(sme_fit, [f'abund {ele}'], **runtime_kwargs)
     
     # Calculate the EW
     indices = (sme_fit.wave[0] >= fit_range[0]) & (sme_fit.wave[0] <= fit_range[1])
@@ -578,10 +723,10 @@ def abund_fit(ele, ion, wav, flux, flux_uncs, line_wav, fit_range, R, teff, logg
     sme_fit.linelist = use_list_fit
     if sme_fit.fitresults['fit_uncertainties'][0] < 8:
         sme_fit.abund[ele] += sme_fit.fitresults['fit_uncertainties'][0] - sme_fit.monh
-        sme_fit = synthesize_spectrum(sme_fit)
+        sme_fit = synthesize_spectrum(sme_fit, **runtime_kwargs)
         plus_fit_synth = sme_fit.synth[0].copy()
         sme_fit.abund[ele] -= 2*sme_fit.fitresults['fit_uncertainties'][0] + sme_fit.monh
-        sme_fit = synthesize_spectrum(sme_fit)
+        sme_fit = synthesize_spectrum(sme_fit, **runtime_kwargs)
         minus_fit_synth = sme_fit.synth[0].copy()
         sigma_EW = (np.trapz(1-plus_fit_synth[indices], sme_fit.wave[0][indices]) - np.trapz(1-minus_fit_synth[indices], sme_fit.wave[0][indices])) / 2 * 1000
         # diff_EW = np.mean(flux_uncs[(wav >= fit_range[0]) & (wav <= fit_range[1])])/2 * 1000
@@ -737,7 +882,10 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
                 save=False, overwrite=False, central_depth_thres=0.01, cal_central_depth=True, sensitivity_dominance_thres=0.3, line_dominance_thres=0.3, max_line_num=10, 
                 fit_rv=False, telluric_spec=None, max_telluric_depth_thres=None, line_select_save=False, fit_line_group=None, sensitive_synth=None, 
                 blending_line_plot=[], cscale_flag='constant', include_moleculer=False, mu=None, ele_blend_fit=[], star_name=None, line_select_method='sensitive', line_selection_dict=None, margin_ratio=2,
-                cdr_database=None, cdr_negligibe_database=None):
+                cdr_database=None, cdr_negligibe_database=None, target_species_only=False, cdepth_n_jobs=10, sensitive_synth_n_jobs=10,
+                linelist_mode='all', smelib_lineinfo_mode=0, line_precompute_database=None,
+                line_select_method_internal='internal', line_select_recompute='if_stale', line_select_reuse='none',
+                line_select_parallel=False, line_select_n_jobs=1, keep_line_opacity=False):
     '''
     The main function for determining abundances using pysme.
     Input: observed wavelength, normalized flux, teff, logg, [M/H], vmic, vmac, vsini, line_list, pysme initial abundance list, line mask of wavelength to be removed.
@@ -800,11 +948,12 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
         # Calculate the central_depth and line_range, if required or no such column
         sme = SME_Structure()
         sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, m_h, vmic, vmac, vsini
-        line_list = pysme_synth.get_cdepth_range(sme, line_list, parallel=True, n_jobs=10)
+        line_list = pysme_synth.get_cdepth_range(sme, line_list, parallel=True, n_jobs=cdepth_n_jobs)
         line_list = line_list[(line_list['central_depth'] > central_depth_thres) | (line_list['species'] == 'Li 1')]
 
     # Select the lines to fit
     print(f'Line selection method: {line_select_method}.', flush=True)
+    print(f'Line-selection helper jobs: cdepth_n_jobs={cdepth_n_jobs}, sensitive_synth_n_jobs={sensitive_synth_n_jobs}.', flush=True)
     if line_select_method == 'sensitive':
         # Method 1: use sensitive spectra by calculation
         # Generate synthetic and sensitive spectra using current parameters
@@ -813,7 +962,24 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
             pass
         else:
             fit_line_group = find_line_groups(wave, ele_fit+ele_blend, ion_fit, line_list, v_broad)
-            sensitive_synth = get_sensitive_synth(wave, R, teff, logg, m_h, vmic, vmac, vsini, line_list, abund, ele_fit+ele_blend, ion_fit, fit_line_group, nlte_ele=nlte_ele, include_moleculer=include_moleculer)
+            sensitive_synth = get_sensitive_synth(
+                wave,
+                R,
+                teff,
+                logg,
+                m_h,
+                vmic,
+                vmac,
+                vsini,
+                line_list,
+                abund,
+                ele_fit+ele_blend,
+                ion_fit,
+                fit_line_group,
+                nlte_ele=nlte_ele,
+                include_moleculer=include_moleculer,
+                batch_synth_n_jobs=sensitive_synth_n_jobs,
+            )
             fit_line_group = select_lines(fit_line_group, sensitive_synth, ele_fit+ele_blend, ion_fit, sensitivity_dominance_thres=sensitivity_dominance_thres, line_dominance_thres=line_dominance_thres, max_line_num=max_line_num, output_all=False)
             if line_select_save:
                 pickle.dump(fit_line_group, open(f'{result_folder}/line_selection.pkl', 'wb'))
@@ -837,6 +1003,10 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
         for ele in fit_line_group.keys():
             for ion in fit_line_group[ele].keys():
                 fit_line_group[ele][ion] = util.filter_lines_in_spectrum(fit_line_group[ele][ion], wave, wl_col='wlcent', gap_factor=5.0)
+                if ele == 'Li' and ion == 1 and len(fit_line_group[ele][ion]) > 0:
+                    fit_line_group[ele][ion] = fit_line_group[ele][ion].iloc[
+                        [(fit_line_group[ele][ion]['wlcent'] - 6707.8).abs().argmin()]
+                    ].copy()
                 fit_line_group[ele][ion] = fit_line_group[ele][ion].sort_values('avg_purity', ascending=False)[:max_line_num]
                 if 'wav_s' not in fit_line_group[ele][ion].columns or 'wav_e' not in fit_line_group[ele][ion].columns:
                     fit_line_group[ele][ion]['wav_s'] = fit_line_group[ele][ion]['wlcent'] * (1 - margin_ratio * v_broad / 3e5)
@@ -886,26 +1056,64 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
                                                                   max_telluric_depth_thres=max_telluric_depth_thres,
                                                                   blending_line_plot=blending_line_plot,line_mask_remove=line_mask_remove,
                                                                   cscale_flag=cscale_flag, mu=mu,
-                                                                  ele_blend_fit=ele_blend_fit, star_name=star_name)
+                                                                  target_species_only=target_species_only,
+                                                                  ele_blend_fit=ele_blend_fit, star_name=star_name,
+                                                                  linelist_mode=linelist_mode,
+                                                                  smelib_lineinfo_mode=smelib_lineinfo_mode,
+                                                                  line_precompute_database=line_precompute_database,
+                                                                  cdr_database=cdr_database,
+                                                                  line_select_method_internal=line_select_method_internal,
+                                                                  line_select_recompute=line_select_recompute,
+                                                                  line_select_reuse=line_select_reuse,
+                                                                  line_select_parallel=line_select_parallel,
+                                                                  line_select_n_jobs=line_select_n_jobs,
+                                                                  keep_line_opacity=keep_line_opacity)
                     print('ele_blend_fit_res dict:')
                     print(ele_blend_fit_res)
-                    fit_result.append({f'A({ele})':fitresults.values[0], f'err_A({ele})':fitresults.fit_uncertainties[0], 'EW':EW, 'diff_EW':diff_EW, 'flag':fit_flag} | ele_blend_fit_res)
-                fit_line_group[ele][ion] = pd.concat([fit_line_group[ele][ion], pd.DataFrame(fit_result)], axis=1)
+                    if isinstance(fitresults, dict):
+                        fit_value = fitresults['values'][0]
+                        fit_uncertainty = fitresults['fit_uncertainties'][0]
+                    else:
+                        fit_value = fitresults.values[0]
+                        fit_uncertainty = fitresults.fit_uncertainties[0]
+                    fit_result.append({f'A({ele})': fit_value, f'err_A({ele})': fit_uncertainty, 'EW': EW, 'diff_EW': diff_EW, 'flag': fit_flag} | ele_blend_fit_res)
+                fit_result_df = pd.DataFrame(fit_result, index=fit_line_group[ele][ion].index)
+                fit_line_group[ele][ion] = fit_line_group[ele][ion].join(fit_result_df)
 
-            abun_all = np.concatenate([fit_line_group[ele][i].loc[fit_line_group[ele][i]['flag'] == 'normal', f'A({ele})'].values for i in ion_fit])
-            abun_err_all = np.concatenate([fit_line_group[ele][i].loc[fit_line_group[ele][i]['flag'] == 'normal', f'err_A({ele})'].values for i in ion_fit])
+            normal_abun_all = np.concatenate([fit_line_group[ele][i].loc[fit_line_group[ele][i]['flag'] == 'normal', f'A({ele})'].values for i in ion_fit])
+            normal_abun_err_all = np.concatenate([fit_line_group[ele][i].loc[fit_line_group[ele][i]['flag'] == 'normal', f'err_A({ele})'].values for i in ion_fit])
+            upper_limit_abun_all = np.concatenate([fit_line_group[ele][i].loc[fit_line_group[ele][i]['flag'] == 'upper_limit', f'A({ele})'].values for i in ion_fit])
+            upper_limit_abun_err_all = np.concatenate([fit_line_group[ele][i].loc[fit_line_group[ele][i]['flag'] == 'upper_limit', f'err_A({ele})'].values for i in ion_fit])
 
-            # Get final abundances
-            if len(abun_all) > 0:
-                weights = 1 / abun_err_all**2
-                average_values = np.average(abun_all, weights=weights/np.sum(weights))
-                average_error = np.average((abun_all-average_values)**2, weights=weights/np.sum(weights))
+            def _weighted_average(values, errors):
+                values = np.asarray(values, dtype=float)
+                errors = np.asarray(errors, dtype=float)
+                finite = np.isfinite(values) & np.isfinite(errors) & (errors > 0)
+                if not np.any(finite):
+                    return np.nan, np.nan
+                values = values[finite]
+                errors = errors[finite]
+                weights = 1 / errors**2
+                norm_weights = weights / np.sum(weights)
+                average_values = np.average(values, weights=norm_weights)
+                average_error = np.average((values - average_values)**2, weights=norm_weights)
                 average_error = np.sqrt(average_error + 1 / np.sum(weights))
-                fit_line_group[ele]['average_abundance'] = average_values
-                fit_line_group[ele]['average_abundance_err'] = average_error
+                return average_values, average_error
+
+            # Prefer normal measurements, but preserve upper limits when no normal line survives.
+            if len(normal_abun_all) > 0:
+                average_values, average_error = _weighted_average(normal_abun_all, normal_abun_err_all)
+                average_flag = 'normal'
+            elif len(upper_limit_abun_all) > 0:
+                average_values, average_error = _weighted_average(upper_limit_abun_all, upper_limit_abun_err_all)
+                average_flag = 'upper_limit'
             else:
-                fit_line_group[ele]['average_abundance'] = np.nan
-                fit_line_group[ele]['average_abundance_err'] = np.nan
+                average_values, average_error = np.nan, np.nan
+                average_flag = 'no_valid_line'
+
+            fit_line_group[ele]['average_abundance'] = average_values
+            fit_line_group[ele]['average_abundance_err'] = average_error
+            fit_line_group[ele]['average_abundance_flag'] = average_flag
 
             i = 0
             for ion in ion_fit:

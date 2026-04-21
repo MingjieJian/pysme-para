@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from scipy.signal import convolve
 import matplotlib.pyplot as plt
+from importlib.resources import files as resource_files
 
 from pysme.abund import Abund
 from pysme.sme import SME_Structure
@@ -12,7 +13,7 @@ from copy import copy
 from astropy.table import Table
 from scipy.interpolate import Akima1DInterpolator,interp1d
 
-import sys, pkg_resources, pickle
+import sys, pickle
 
 from contextlib import redirect_stdout
 from tqdm.notebook import tqdm
@@ -28,6 +29,9 @@ from pysme.synthesize import Synthesizer
 from . import pysme_abund, pysme_synth
 
 from scipy.stats import linregress
+
+def _resource_path(relative_path):
+    return str(resource_files("pysme_para").joinpath(relative_path))
 
 def select_lines(spectra, Teff, vald, purity_crit, fwhm, SNR, verbose=False, select_mode='depth'):
 
@@ -429,7 +433,7 @@ def mal(val,gridt,gridbc,dset):
     return(itp)
 
 # read input tables of BCs for several values of E(B-V)
-files = [pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/BC_Tables/grid/STcolors_2MASS_GaiaDR2_EDR3_Rv3.1_EBV_0.00.dat")]
+files = [_resource_path("data/GALAH_DR4/auxiliary_information/BC_Tables/grid/STcolors_2MASS_GaiaDR2_EDR3_Rv3.1_EBV_0.00.dat")]
 
 gebv   = [0.0]
 gri_bc = []
@@ -462,7 +466,7 @@ gebv   = np.array(gebv)
 gri_bc = np.array(gri_bc)
 
 try:
-    parsec = Table.read(pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/parsec_isochrones/parsec_isochrones_logt_8p00_0p01_10p17_mh_m2p75_0p25_m0p75_mh_m0p60_0p10_0p70_GaiaEDR3_2MASS.fits"))
+    parsec = Table.read(_resource_path("data/GALAH_DR4/auxiliary_information/parsec_isochrones/parsec_isochrones_logt_8p00_0p01_10p17_mh_m2p75_0p25_m0p75_mh_m0p60_0p10_0p70_GaiaEDR3_2MASS.fits"))
 except:
     pass
 
@@ -514,12 +518,10 @@ def bcstar(teff,logg,feh,alpha_fe):
 
     if np.isnan(bc_ks):
         
-        bc_grid = np.genfromtxt(pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/BC_Tables/grid/STcolors_2MASS_GaiaDR2_EDR3_Rv3.1_EBV_0.00.dat"), names=True)
+        bc_grid = np.genfromtxt(_resource_path("data/GALAH_DR4/auxiliary_information/BC_Tables/grid/STcolors_2MASS_GaiaDR2_EDR3_Rv3.1_EBV_0.00.dat"), names=True)
         
-        file = open(pkg_resources.resource_filename(__name__, "data/GALAH_DR4/auxiliary_information/BC_Tables/grid/bc_grid_kdtree_ebv_0.00.pickle"), 'rb')
-        
-        bc_kdtree = pickle.load(file)
-        file.close()
+        with open(_resource_path("data/GALAH_DR4/auxiliary_information/BC_Tables/grid/bc_grid_kdtree_ebv_0.00.pickle"), 'rb') as file:
+            bc_kdtree = pickle.load(file)
         
         bc_distance_matches, bc_closest_matches = bc_kdtree.query(np.array([np.log10(teff),logg,feh,alpha_fe]).T,k=8)
         bc_ks = np.average(bc_grid['mbol'][bc_closest_matches] - bc_grid['Ks'][bc_closest_matches],weights=bc_distance_matches,axis=-1)
