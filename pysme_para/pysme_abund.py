@@ -65,6 +65,20 @@ def _blend_ratio_batch(l0, d0, wl_oth, dep_oth, left_idx, right_idx, R):
 
 import numpy as np
 
+def _has_valid_line_ranges(line_list):
+    if 'line_range_s' not in line_list.columns or 'line_range_e' not in line_list.columns:
+        return False
+    try:
+        range_s = np.asarray(line_list['line_range_s'], dtype=float)
+        range_e = np.asarray(line_list['line_range_e'], dtype=float)
+    except (TypeError, ValueError):
+        return False
+    return np.isfinite(range_s).any() and np.isfinite(range_e).any()
+
+def _calculate_cdepth_ranges(sme, line_list, central_depth_thres, cdepth_n_jobs):
+    line_list = pysme_synth.get_cdepth_range(sme, line_list, parallel=True, n_jobs=cdepth_n_jobs)
+    return line_list[(line_list['central_depth'] > central_depth_thres) | (line_list['species'] == 'Li 1')]
+
 def combine_depths(lams, depths, center, R=20000, v_broad_kms=7.0):
     """
     将多条近邻线在 center 处合并成一个线深（≤1）。
@@ -944,12 +958,16 @@ def pysme_abund(wave, flux, flux_err, R, teff, logg, m_h, vmic, vmac, vsini, lin
         sme.linelist = line_list
         s.flag_strong_lines_by_database(sme, cdr_negligibe_database=cdr_negligibe_database)
         line_list = sme.linelist
+        if not _has_valid_line_ranges(line_list):
+            print('CDR negligible database did not provide valid line ranges; falling back to central-depth calculation.', flush=True)
+            sme = SME_Structure()
+            sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, m_h, vmic, vmac, vsini
+            line_list = _calculate_cdepth_ranges(sme, line_list, central_depth_thres, cdepth_n_jobs)
     elif 'central_depth' not in line_list.columns or 'line_range_s' not in line_list.columns or 'line_range_e' not in line_list.columns or cal_central_depth:
         # Calculate the central_depth and line_range, if required or no such column
         sme = SME_Structure()
         sme.teff, sme.logg, sme.monh, sme.vmic, sme.vmac, sme.vsini = teff, logg, m_h, vmic, vmac, vsini
-        line_list = pysme_synth.get_cdepth_range(sme, line_list, parallel=True, n_jobs=cdepth_n_jobs)
-        line_list = line_list[(line_list['central_depth'] > central_depth_thres) | (line_list['species'] == 'Li 1')]
+        line_list = _calculate_cdepth_ranges(sme, line_list, central_depth_thres, cdepth_n_jobs)
 
     # Select the lines to fit
     print(f'Line selection method: {line_select_method}.', flush=True)
